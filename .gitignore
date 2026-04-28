@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyd
+*.pyo
+
+# Virtual environments
+.venv/
+venv/
+
+# Tool caches
+.cache/
+.uv-cache/
+
+# IDE / editor
+.idea/
+.vscode/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Runtime logs and local outputs
+*.log
+log.txt
+
+# Generated per-app workspaces
+workspaces/
+
+# Local helper artifacts
+hook_da5_outputs/
