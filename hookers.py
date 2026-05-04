@@ -357,7 +357,7 @@ class HookersCli:
 
         while True:
             try:
-                print("Frida安卓逆向集成工具 2.0")
+                print("Frida-Hookers 安卓逆向集成工具 2.0")
                 print("-" * 95)
 
                 identifiers = self.list_apps()

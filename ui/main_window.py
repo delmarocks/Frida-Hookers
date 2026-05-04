@@ -104,7 +104,7 @@ class MainWindow(QMainWindow):
 
         self.script_root = self.deps.context.js_dir
 
-        self.setWindowTitle("Hookers GUI 工作台")
+        self.setWindowTitle("Frida-Hookers GUI 工作台")
         self.resize(1500, 920)
         self._build_ui()
         self.sync_frida_server_variant()

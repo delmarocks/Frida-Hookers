@@ -1,11 +1,11 @@
-# Hookers
+# Frida-Hookers
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](https://opensource.org/licenses/MIT)
 ![Python 3.12+](https://img.shields.io/badge/Python-3.12%2B-3776AB)
 ![Platform Windows](https://img.shields.io/badge/Platform-Windows-0078D4)
 ![Status Experimental](https://img.shields.io/badge/Status-Experimental-orange)
 
-`Hookers` 是一个面向 Android 动态调试场景的本地工作台，用来把分散的 Frida 调试准备工作收敛成一套统一流程：
+`Frida-Hookers` 是一个面向 Android 动态调试场景的本地工作台，用来把分散的 Frida 调试准备工作收敛成一套统一流程：
 
 - 连接 ADB 设备
 - 启动匹配架构的 `frida-server`
@@ -22,13 +22,13 @@
 - GUI: `app_gui.py`
 - CLI: `hookers.py`
 
-![Hookers GUI Overview](docs/images/gui-overview.png)
+![Frida-Hookers GUI Overview](docs/images/gui-overview.png)
 
 ## Demo / 演示
 
 GUI 主界面：
 
-![Hookers GUI Demo](docs/images/gui-overview.gif)
+![Frida-Hookers GUI Demo](docs/images/gui-overview.gif)
 
 Hook 注入过程：
 
@@ -36,7 +36,7 @@ Hook 注入过程：
 
 ---
 
-## 1. 为什么用 Hookers / Why Hookers
+## 1. 为什么用 Frida-Hookers / Why Frida-Hookers
 
 如果你平时做 Android Frida 调试，通常会不断重复这些动作：
 
@@ -46,7 +46,7 @@ Hook 注入过程：
 - 每次重新准备脚本目录
 - 每次重新拉 APK、记包名、切 attach / spawn
 
-`Hookers` 的目标不是替代 Frida，而是把这些重复劳动前移成可复用的工程结构。当前代码里，这套职责被拆成了清晰的 service 层：
+`Frida-Hookers` 的目标不是替代 Frida，而是把这些重复劳动前移成可复用的工程结构。当前代码里，这套职责被拆成了清晰的 service 层：
 
 - [core/device_service.py](C:/Users/mengze/Desktop/hooker-master/core/device_service.py:15)：设备连接、root 检查、`frida-server`、`radar.dex`
 - [core/workspace_service.py](C:/Users/mengze/Desktop/hooker-master/core/workspace_service.py:31)：`workspaces/<package>/` 工作区、脚本复制、APK 拉取
@@ -281,7 +281,7 @@ GUI 中的高频动作包括：
 
 当前 GUI 实际界面如下：
 
-![Hookers GUI Overview](docs/images/gui-overview.png)
+![Frida-Hookers GUI Overview](docs/images/gui-overview.png)
 
 ### 6.1 调试工具区怎么用
 
