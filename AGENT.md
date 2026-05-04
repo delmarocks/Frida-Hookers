@@ -2,11 +2,12 @@
 
 ## Project Summary
 
-This repository is a local Android dynamic analysis workbench built around:
+This repository is the `Frida-Hookers` local Android dynamic analysis workbench built around:
 
 - `ADB`
 - `root` / `su`
 - `frida-server`
+- optional `Florida` anti-detection server variant
 - `radar.dex`
 - reusable Frida JavaScript scripts
 
@@ -16,6 +17,12 @@ It provides two user-facing entry points:
 - CLI: `hookers.py`
 
 At the current stage of the repository, the GUI is the recommended primary entry point for understanding and using the project. The CLI still matters, but the public-facing docs and recent improvements are centered on the GUI workflow.
+
+Recent user-facing naming:
+
+- project display name: `Frida-Hookers`
+- GUI window title: `Frida-Hookers GUI 工作台`
+- CLI banner: `Frida-Hookers 安卓逆向集成工具 2.0`
 
 The project is primarily for working against one target Android app at a time, then creating a per-package local workspace under `workspaces/` for scripts, helper batch files, APK pulls, and hook outputs.
 
@@ -68,6 +75,11 @@ Responsible for device and runtime preparation:
 - detect root / Magisk
 - determine CPU architecture
 - start `frida-server`
+- choose between standard Frida server and `Florida` in GUI-driven runs
+- anonymize remote server filenames under `/data/local/tmp/fr/`
+  - `fri-ser` for standard Frida
+  - `flo-ser` for Florida
+- clean `/data/local/tmp/fr/` before environment preparation and on GUI exit
 - deploy `radar.dex`
 - enumerate installed/running applications
 - bring target app to foreground
@@ -139,6 +151,10 @@ Important recent GUI behavior:
 - GUI utility actions reuse a persistent RPC session through `RpcService`
 - when a valid active hook session already exists, GUI inspection actions reuse the current app context instead of always forcing a new foreground check
 - the middle “debug tools” panel is a key surface for script generation, object inspection, and Activity/Service queries
+- the environment-preparation form includes `Frida sever选择` with:
+  - `正常 Frida sever`
+  - `过检测 Florid sever`
+- the selected server variant is runtime-only and does not persist to config files
 
 The GUI uses background workers to avoid blocking the Qt main thread during ADB/Frida operations.
 
@@ -182,6 +198,7 @@ Especially important files:
 `mobile-deploy/` contains artifacts pushed or used against the Android device, including:
 
 - `frida-server` binaries
+- `florida-server-16.7.19`
 - `radar.dex`
 - helper native/network binaries
 
@@ -192,12 +209,13 @@ These are part of runtime deployment, not business logic.
 ### Recommended flow
 
 1. Run `python app_gui.py`
-2. Click “准备环境并刷新 App”
-3. Select target app
-4. Optionally initialize the workspace and pull APK
-5. Choose script or generate a hook script
-6. Start attach/spawn injection
-7. Use GUI debug tools to inspect Activity / Service / Object / View state
+2. Choose a server in `Frida sever选择`
+3. Click “准备环境并刷新 App”
+4. Select target app
+5. Optionally initialize the workspace and pull APK
+6. Choose script or generate a hook script
+7. Start attach/spawn injection
+8. Use GUI debug tools to inspect Activity / Service / Object / View state
 
 ### CLI flow
 
@@ -256,14 +274,14 @@ Python dependencies are listed in `requirements.txt`, mainly:
 ## Maintenance Notes
 
 - The codebase is already partially refactored from a single-script design into services plus CLI/GUI shells.
-- The GUI file `ui/main_window.py` is large and contains signs of iterative migration.
+- The GUI file `ui/main_window.py` is large and still contains signs of iterative migration.
 - Per-package directories under `workspaces/` are generated workspaces and should not be mistaken for core framework modules.
-- `ui/main_window.py` still contains a large legacy comment block with retired helper methods, so future cleanup should distinguish active code from migration leftovers.
 - `README.md` now contains substantial product-facing guidance, screenshots, GIF demos, and GUI tool explanations; keep `AGENT.md` aligned with that high-level positioning.
 
 ## Practical Guidance For Future Agents
 
 - If the user asks “what is this project,” describe it as an Android Frida/ADB workbench with per-app workspaces under `workspaces/`.
+- If the user asks for the current product/project name, use `Frida-Hookers`.
 - Default to explaining the GUI workflow first unless the user explicitly asks about the CLI.
 - If the user asks to modify behavior, determine first whether the change belongs in:
   - device preparation
