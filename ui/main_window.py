@@ -790,6 +790,23 @@ class MainWindow(QMainWindow):
         self.stop_hook_button.setDisabled(True)
         self.refresh_app_status_panel(package_name or None)
 
+    def normalize_js_log_message(self, message: str) -> str:
+        normalized = message.replace("\r\n", "\n").replace("\r", "\n")
+        normalized = "\n".join(line.rstrip() for line in normalized.split("\n"))
+        normalized = re.sub(r"\n{3,}", "\n\n", normalized)
+        return normalized.rstrip()
+
+    def is_effectively_empty_js_log(self, message: str) -> bool:
+        if message.startswith("[JS:ERROR]"):
+            payload = message[len("[JS:ERROR]"):]
+        elif message.startswith("[JS:WARN]"):
+            payload = message[len("[JS:WARN]"):]
+        elif message.startswith("[JS]"):
+            payload = message[len("[JS]"):]
+        else:
+            return False
+        return payload.strip() == ""
+
     def classify_log(self, message: str) -> LogRecord:
         # 根据日志前缀和关键词做粗粒度分类。
         #
@@ -1014,9 +1031,9 @@ class MainWindow(QMainWindow):
         cursor = self.log_console.textCursor()
         cursor.movePosition(QTextCursor.End)
         cursor.insertHtml(
-            f'<div style="color: {self.log_color(record)}; white-space: pre-wrap;">'
+            f'<span style="color: {self.log_color(record)}; white-space: pre-wrap;">'
             f"{escape(record.message)}"
-            "</div>"
+            "</span><br/>"
         )
         self.log_console.setTextCursor(cursor)
         self.log_console.ensureCursorVisible()
@@ -1055,9 +1072,9 @@ class MainWindow(QMainWindow):
                         continue
                     self.visible_log_match_positions.append((plain_text_offset + start, end - start))
             html_lines.append(
-                f'<div style="color: {self.log_color(record)}; white-space: pre-wrap;">'
+                f'<span style="color: {self.log_color(record)}; white-space: pre-wrap;">'
                 f"{message_html}"
-                "</div>"
+                "</span><br/>"
             )
             total_matches += match_count
             plain_text_offset += len(record.message) + 1
@@ -1158,7 +1175,15 @@ class MainWindow(QMainWindow):
         # 2. 控制内存中的最大日志条数
         # 3. 根据当前过滤器刷新右侧面板
         # 4. 如果配置了日志文件，就同步落盘
-        record = self.classify_log(message.rstrip())
+        normalized_message = message.rstrip()
+        record = self.classify_log(normalized_message)
+        if record.category == "js":
+            normalized_message = self.normalize_js_log_message(normalized_message)
+            record = self.classify_log(normalized_message)
+            if self.is_effectively_empty_js_log(record.message):
+                last_record = self.log_records[-1] if self.log_records else None
+                if last_record and self.is_effectively_empty_js_log(last_record.message):
+                    return
         self.log_records.append(record)
 
         # 做一层简单的内存保护，避免高频日志长时间运行后把 GUI 拖慢。
