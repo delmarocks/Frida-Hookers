@@ -243,7 +243,7 @@ class HookersCli:
         # 这一步是从应用列表模式切换到调试模式的关键桥梁：
         # 1. 确保目标 app 在前台并获取 PID/版本/APK 路径等信息
         # 2. 确保本地工作目录存在，脚本副本和 APK 已准备好
-        app = self.device_service.ensure_app_in_foreground(identifier)
+        app = self.device_service.prepare_app_context(identifier)
         self.workspace_service.ensure_workspace(app)
 
     def entry_debug_mode(self) -> None:

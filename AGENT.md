@@ -1,294 +1,182 @@
 # AGENT.md
 
-## Project Summary
+## At a Glance
 
-This repository is the `Frida-Hookers` local Android dynamic analysis workbench built around:
+- Project name: `Frida-Hookers`
+- What it is:
+  - A local Android Frida/ADB workbench for one target app at a time.
+  - It combines device preparation, per-app workspace management, Frida attach/spawn, RPC-style inspection tooling, and local APK scanning.
+- Primary entrypoint: `app_gui.py`
+- Secondary entrypoint: `hookers.py`
+- Primary runtime model:
+  - shared `HookerContext`
+  - service layer in `core/`
+  - GUI orchestration in `ui/main_window.py`
+- Primary workflow:
+  - prepare device
+  - choose target app
+  - initialize workspace
+  - attach or spawn
+  - use RPC/inspection tools
+- Current product posture:
+  - GUI-first
+  - CLI still works, but recent user-facing behavior changes are centered on the GUI
+- Current user-facing naming:
+  - project display name: `Frida-Hookers`
+  - GUI window title: `Frida-Hookers GUI 工作台`
+  - CLI banner: `Frida-Hookers 安卓逆向集成工具 2.0`
 
-- `ADB`
-- `root` / `su`
-- `frida-server`
-- optional `Florida` anti-detection server variant
-- `radar.dex`
-- reusable Frida JavaScript scripts
+## If You Only Read 5 Files
 
-It provides two user-facing entry points:
+1. `app_gui.py`
+   - Shows how the GUI runtime is assembled.
+   - Builds `HookerContext`, wires services, enables persistent RPC reuse.
+2. `ui/main_window.py`
+   - The main product surface.
+   - Best file for understanding real GUI flow, state transitions, and visible controls.
+3. `core/models.py`
+   - Defines the shared runtime state.
+   - Read this to understand what all services mutate and depend on.
+4. `core/device_service.py`
+   - Owns device bootstrap, server selection, app discovery, and app readiness checks.
+   - Most environment-preparation behavior starts here.
+5. `core/session_service.py`
+   - Owns attach/spawn, script load, session cleanup, and detached-session handling.
+   - Read this before changing hook lifecycle behavior.
 
-- GUI: `app_gui.py`
-- CLI: `hookers.py`
+If you need one more file after those five, read:
 
-At the current stage of the repository, the GUI is the recommended primary entry point for understanding and using the project. The CLI still matters, but the public-facing docs and recent improvements are centered on the GUI workflow.
+- `core/rpc_service.py` for RPC inspection and hook generation
+- `core/apk_scan_service.py` for the local `ApkCheckPack.exe` scan flow
 
-Recent user-facing naming:
+## Mental Model
 
-- project display name: `Frida-Hookers`
-- GUI window title: `Frida-Hookers GUI 工作台`
-- CLI banner: `Frida-Hookers 安卓逆向集成工具 2.0`
+- `HookerContext` is the single shared runtime state.
+- Services own behavior; GUI mostly orchestrates and renders state.
+- `DeviceService` prepares the Android side.
+- `WorkspaceService` materializes per-package local workspaces under `workspaces/<package>/`.
+- `SessionService` owns attach/spawn/session lifecycle.
+- `RpcService` owns `js/rpc.js`-based inspection and hook generation.
+- `ApkScanService` owns local APK scanning through `mobile-deploy/ApkCheckPack.exe`.
+- `workspaces/<package>/` is per-target output, not core framework code.
+- `js/` contains reusable Frida assets and hook-generation templates.
+- `mobile-deploy/` contains device-side binaries/artifacts, not business logic.
 
-The project is primarily for working against one target Android app at a time, then creating a per-package local workspace under `workspaces/` for scripts, helper batch files, APK pulls, and hook outputs.
+## Current Behavioral Truths
 
-## Important Scope
+- GUI is the primary product surface and the preferred path for understanding current behavior.
+- Attach only attaches to an already running PID.
+- Attach does not bring the target app to foreground.
+- GUI debug-tool actions also avoid forcing foreground.
+- After `准备环境并刷新 App`, the GUI tries to detect the current foreground Android app and auto-select it if that package also exists in the refreshed app list.
+- If there is no resolvable foreground app, the GUI leaves target-app selection empty.
+- Workspace initialization ensures a local APK copy exists under `workspaces/<package>/`.
+- Selecting an app in the GUI no longer creates or materializes workspace files by itself.
+- Full workspace creation / helper generation / built-in JS copy / local APK preparation only happens after the user clicks `初始化工作目录并刷新列表`.
+- The project now uses a single fixed device-side server:
+  - local file: `mobile-deploy/rusda-server-16.2.1-android-arm64`
+  - remote path: `/data/local/tmp/rusda-16.2.1`
+- There is no longer any GUI option for switching between normal/hidden Frida variants.
+- During `准备环境并刷新 App`, if the managed rusda server is already alive and passes Frida probe, the project skips remote cleanup and restart.
+- If the remote rusda file already exists but the service needs to be restarted, the project now reuses that file instead of deleting and re-uploading it.
+- Device preparation may clean/restart the managed server when needed.
+- GUI exit no longer cleans the device-side `rusda-16.2.1` file automatically.
+- GUI no longer shows a dedicated fixed-server info block in the control panel.
+- GUI exposes a left-panel `停止 Frida Server` button for explicitly stopping the managed device-side server.
+- GUI uses persistent RPC reuse for high-frequency inspection actions.
+- The right-side log panel supports:
+  - category filtering
+  - keyword / regex search
+  - case-sensitive search
+  - `仅显示匹配项`
+  - previous / next match navigation
+  - a `专注日志` mode that temporarily maximizes the log area
+- The log panel is optimized to avoid re-rendering the entire log buffer on every new line:
+  - bursty logs are batched on a short timer
+  - plain streaming logs without active search use incremental append instead of full HTML rebuild
+- GUI also exposes a left-panel `APK扫描` tool for manually chosen local `.apk` files.
+- APK scanning is independent of `current_app`, workspaces, and attach/spawn session state.
+- APK scanning directly calls `mobile-deploy/ApkCheckPack.exe -f <apk>` and writes results to the right-side log panel.
+- Detached Frida sessions now emit clearer user-facing diagnostics instead of only raw detach reasons.
+- `README.md` is product-facing; when `README.md` and code diverge, treat current code as the source of truth.
 
-When understanding or modifying this project:
+## Where To Change What
 
-- Treat `workspaces/com.secret.prettyhezi/` as out of scope unless the user explicitly asks for it.
-- That directory is a per-app workspace, not part of the core framework architecture.
-- Focus on `core/`, `ui/`, top-level Python entry files, `js/`, and `mobile-deploy/`.
-- Treat `docs/images/` as documentation assets for the GitHub README, not runtime code.
+- Device bootstrap, root checks, server selection, remote deploy/cleanup, app enumeration:
+  - `core/device_service.py`
+- Workspace creation, JS copying, helper bat generation, workspace script resolution/output persistence:
+  - `core/workspace_service.py`
+- Attach/spawn semantics, script loading, session cleanup, restart behavior, detached-session handling:
+  - `core/session_service.py`
+- RPC inspection, hook generation, persistent RPC session behavior:
+  - `core/rpc_service.py`
+- Local APK scanning through `ApkCheckPack.exe`:
+  - `core/apk_scan_service.py`
+- GUI controls, worker wiring, visible labels, button flows, terminal/log presentation:
+  - `ui/main_window.py`
+- Background execution wrappers for GUI actions:
+  - `ui/workers/`
 
-## High-Level Architecture
-
-The codebase is split into:
-
-- orchestration entrypoints
-- shared state models
-- service layer
-- GUI layer
-- Frida JS assets
-- device deployment assets
-
-### Entrypoints
-
-- `hookers.py`
-  - CLI shell for device bootstrap, app selection, attach/spawn, RPC-style inspection commands, and hook generation.
-- `app_gui.py`
-  - PySide6 GUI entrypoint.
-  - Builds the shared context and injects service dependencies into the main window.
-  - Explicitly enables persistent RPC reuse for GUI actions.
-
-### Shared State
-
-- `core/models.py`
-  - `AppRecord`: app list item from device enumeration.
-  - `AppContext`: full context for the currently selected target app.
-  - `HookSession`: current active Frida session/script.
-  - `HookerContext`: repository-wide shared runtime state.
-
-`HookerContext` is the center of the app. Services do not maintain isolated copies of state; they collaborate through this shared context.
-
-## Core Services
-
-### `core/device_service.py`
-
-Responsible for device and runtime preparation:
-
-- connect to ADB device
-- detect root / Magisk
-- determine CPU architecture
-- start `frida-server`
-- choose between standard Frida server and `Florida` in GUI-driven runs
-- anonymize remote server filenames under `/data/local/tmp/fr/`
-  - `fri-ser` for standard Frida
-  - `flo-ser` for Florida
-- clean `/data/local/tmp/fr/` before environment preparation and on GUI exit
-- deploy `radar.dex`
-- enumerate installed/running applications
-- bring target app to foreground
-- prepare `AppContext`
-
-This is the service that bridges local Python logic with the Android device.
-
-### `core/workspace_service.py`
-
-Responsible for local per-package workspace management:
-
-- create `workspaces/<package>/` workspace directory
-- create `workspaces/<package>/js/`
-- copy built-in JS templates from global `js/`
-- generate helper bat files like `attach.bat`, `spawn.bat`, `hooking.bat`
-- pull target APK into the workspace
-- resolve script paths
-- persist decrypted output sent back from Frida scripts
-
-This service is what turns the repository into a reusable “one app, one workspace” workbench.
-
-### `core/session_service.py`
-
-Responsible for Frida session lifecycle:
-
-- attach to current process
-- spawn target process and attach early
-- load script source
-- prepend common console bridge and wrapping JS
-- handle script messages
-- stop and clean up active session
-- restart current app
-
-It owns the active Frida session stored in `HookerContext.active_session`.
-
-### `core/rpc_service.py`
-
-Responsible for RPC-style Frida interactions through `js/rpc.js`:
-
-- attach/load RPC script for inspection and hook generation
-- call exported RPC methods
-- query Activity / Service / Object / View information
-- generate hook scripts into the current app workspace
-- optionally start a device-side HTTP service
-
-This service is used by both CLI debug commands and GUI utility actions.
-CLI keeps the original short-lived behavior; GUI enables a reusable persistent RPC session to avoid repeated attach/load/detach on every button click.
-
-## GUI Layer
-
-### `ui/main_window.py`
-
-The GUI is not a separate architecture. It is mainly a visual orchestrator over the same services used by the CLI.
-
-Main responsibilities:
-
-- choose script directory
-- prepare device environment
-- refresh app list
-- choose target app
-- initialize workspace
-- choose attach/spawn mode
-- start and stop hook session
-- run RPC utility actions
-- display logs
-
-Important recent GUI behavior:
-
-- GUI utility actions reuse a persistent RPC session through `RpcService`
-- when a valid active hook session already exists, GUI inspection actions reuse the current app context instead of always forcing a new foreground check
-- the middle “debug tools” panel is a key surface for script generation, object inspection, and Activity/Service queries
-- the environment-preparation form includes `Frida sever选择` with:
-  - `正常 Frida sever`
-  - `过检测 Florid sever`
-- the selected server variant is runtime-only and does not persist to config files
-
-The GUI uses background workers to avoid blocking the Qt main thread during ADB/Frida operations.
-
-### `ui/workers/`
-
-- `device_worker.py`
-  - bootstrap device environment and refresh app list
-- `workspace_worker.py`
-  - ensure target app foreground state and initialize workspace
-- `hook_worker.py`
-  - prepare app context and start attach/spawn
-- `action_worker.py`
-  - execute generic one-shot GUI actions asynchronously
-
-## JS Assets
-
-Global Frida scripts live under `js/`.
-
-Important categories:
-
-- network inspection and okhttp hooks
-- root / VPN / trust bypass helpers
-- UI interaction helpers
-- dex dumping / keystore dumping
-- RPC support
-- hook generation wrappers
-
-Especially important files:
-
-- `js/rpc.js`
-  - exported RPC methods used by `RpcService`
-- `js/_hook_js_prepare.js`
-  - prefix template for generated hooks
-- `js/_hook_js_enhance.js`
-  - extra helper logic appended to generated hooks
-- `js/_hook_js_warp.js`
-  - common wrapping code appended when scripts are loaded
-
-## Device Assets
-
-`mobile-deploy/` contains artifacts pushed or used against the Android device, including:
-
-- `frida-server` binaries
-- `florida-server-16.7.19`
-- `radar.dex`
-- helper native/network binaries
-
-These are part of runtime deployment, not business logic.
-
-## Typical Runtime Flow
-
-### Recommended flow
-
-1. Run `python app_gui.py`
-2. Choose a server in `Frida sever选择`
-3. Click “准备环境并刷新 App”
-4. Select target app
-5. Optionally initialize the workspace and pull APK
-6. Choose script or generate a hook script
-7. Start attach/spawn injection
-8. Use GUI debug tools to inspect Activity / Service / Object / View state
-
-### CLI flow
-
-1. Run `python hookers.py`
-2. Bootstrap device environment
-3. Refresh app list
-4. Select package name
-5. Ensure app is running/in foreground or prepare spawn context
-6. Ensure local workspace
-7. Attach or spawn with selected script
-8. Optionally run RPC-style inspection and hook-generation commands
+## Primary Runtime Flow
 
 ### GUI flow
 
-1. Run `python app_gui.py`
-2. Build `HookerContext`
-3. Construct service instances
-4. Inject them into `MainWindow`
-5. Use GUI actions to prepare environment, choose app, initialize workspace, and start hook session
-6. Reuse persistent RPC calls for high-frequency inspection buttons
+1. Run `python app_gui.py`.
+2. Build `HookerContext`.
+3. Construct `DeviceService`, `WorkspaceService`, `SessionService`, and `RpcService`.
+4. Enable persistent RPC reuse.
+5. Click `准备环境并刷新 App`.
+6. Select a target app.
+7. Optionally initialize the workspace and refresh the script list.
+8. Choose a script or generate one.
+9. Start attach/spawn injection.
+10. Use GUI tools to inspect Activity / Service / Object / View state.
 
-## Repository Layout To Prioritize
+### GUI local APK scan flow
 
-When a new conversation needs to understand this repo quickly, read files in roughly this order:
+1. Use the left-panel `APK扫描` section.
+2. Click `选择 APK`.
+3. Pick a local `.apk` file manually.
+4. Click `开始扫描`.
+5. The GUI runs `mobile-deploy/ApkCheckPack.exe -f <apk>` asynchronously.
+6. Output is written to the right-side log panel.
 
-1. `README.md`
-2. `app_gui.py`
-3. `ui/main_window.py`
-4. `core/models.py`
-5. `core/device_service.py`
-6. `core/workspace_service.py`
-7. `core/session_service.py`
-8. `core/rpc_service.py`
-9. `hookers.py`
+### CLI note
+
+- `hookers.py` still matters for command-driven workflows.
+- CLI remains useful for direct attach/spawn and RPC-style commands.
+- Do not assume CLI behavior is the same UX target as the GUI.
 
 ## Environment Assumptions
 
-The project assumes:
-
-- Windows host environment
+- Windows-oriented host environment
 - Python 3.12 or 3.13
-- `adb` installed and available
-- Android device available over ADB
-- target device has root access
-- correct `frida-server` binary available for device architecture
+- `adb` available
+- Android device connected over ADB
+- Root access available on the target device
+- The active Frida server artifact is expected at:
+  - `mobile-deploy/rusda-server-16.2.1-android-arm64`
+- `mobile-deploy/ApkCheckPack.exe` present for the GUI APK scan feature
+- Main Python dependencies include:
+  - `frida==16.2.1`
+  - `frida-tools==12.3.0`
+  - `adbutils`
+  - `PySide6`
+  - `prompt_toolkit`
+  - `jsbeautifier`
 
-Python dependencies are listed in `requirements.txt`, mainly:
+- Version note:
+  - `frida-tools==13.x` is intentionally avoided here because it upgrades `frida` to `>=16.2.2`, which breaks the repo's version-alignment goal with `rusda-server-16.2.1`.
 
-- `frida`
-- `frida-tools`
-- `adbutils`
-- `PySide6`
-- `prompt_toolkit`
-- `jsbeautifier`
+## Common Misreads To Avoid
 
-## Maintenance Notes
-
-- The codebase is already partially refactored from a single-script design into services plus CLI/GUI shells.
-- The GUI file `ui/main_window.py` is large and still contains signs of iterative migration.
-- Per-package directories under `workspaces/` are generated workspaces and should not be mistaken for core framework modules.
-- `README.md` now contains substantial product-facing guidance, screenshots, GIF demos, and GUI tool explanations; keep `AGENT.md` aligned with that high-level positioning.
-
-## Practical Guidance For Future Agents
-
-- If the user asks “what is this project,” describe it as an Android Frida/ADB workbench with per-app workspaces under `workspaces/`.
-- If the user asks for the current product/project name, use `Frida-Hookers`.
-- Default to explaining the GUI workflow first unless the user explicitly asks about the CLI.
-- If the user asks to modify behavior, determine first whether the change belongs in:
-  - device preparation
-  - workspace creation
-  - session lifecycle
-  - RPC tooling
-  - GUI orchestration
-- If the user is asking about screenshot-visible controls, inspect `ui/main_window.py` and `README.md` together because the README now documents the intended GUI usage surface.
-- Prefer reading `core/` first before changing `ui/`.
-- Do not treat `workspaces/com.secret.prettyhezi/` as core source code unless explicitly requested.
+- Do not treat per-package directories under `workspaces/` as core source code unless explicitly requested.
+- Do not assume old README wording still matches current runtime behavior.
+- Do not assume any hidden/phantom Frida mode still exists in current code; the project now uses one fixed `rusda-server-16.2.1` deployment path.
+- Do assume workspace initialization ensures a local APK copy exists under `workspaces/<package>/`.
+- Do not assume attach means bringing the target app to foreground.
+- Do not assume GUI utility actions are allowed to foreground the app.
+- Do not assume `APK扫描` depends on the selected target app or workspace; it is a standalone local-file tool.
+- Do not infer Linux support from Python/PySide portability alone; the repo is still Windows-oriented in practice.
+- Do not start by editing `ui/` if the requested change is actually a device/session/workspace behavior problem.
+- Do not treat `mobile-deploy/` binaries as explanatory source code; they are runtime assets.

@@ -73,6 +73,17 @@ class WorkspaceService:
         path.write_text(text, encoding="utf-8", newline="")
         return path
 
+    def _sanitize_filename_component(self, value: Optional[str], fallback: str) -> str:
+        raw = (value or "").strip()
+        if not raw:
+            raw = fallback
+        sanitized = "".join(
+            ch if ch.isalnum() or ch in "._-() " else "_"
+            for ch in raw
+        ).strip()
+        sanitized = sanitized.rstrip(". ")
+        return sanitized or fallback
+
     def _render_builtin_script(self, js_file: str, package_name: str) -> Optional[str]:
         src = self.context.js_dir / js_file
         if not src.exists():
@@ -114,45 +125,27 @@ class WorkspaceService:
             if updated != existing:
                 self.create_working_file(target, updated)
 
-    def ensure_workspace_shell(self, package_name: str) -> Path:
-        # 先创建一个“轻量工作区壳”。
-        #
-        # 这个方法不会依赖 AppContext，也不会拉 APK，只做两件事：
-        # 1. 确保 workspaces/<package>/ 和 workspaces/<package>/js/ 存在
-        # 实际路径位于 workspaces/<package>/ 下。
-        # 2. 如果脚本目录为空，就从全局模板复制一份默认脚本进去
-        #
-        # GUI 在用户刚选中包名时，可以先用这个方法把工作区准备出来，
-        # 然后把左侧脚本目录默认切换到 workspaces/<package>/js。
-        package_dir = self.workspace_dir(package_name)
-        script_dir = self.script_dir(package_name)
-        self.context.workspaces_dir.mkdir(parents=True, exist_ok=True)
-        package_dir.mkdir(parents=True, exist_ok=True)
-        script_dir.mkdir(parents=True, exist_ok=True)
-
-        if any(script_dir.glob("*.js")):
-            return package_dir
-
-        self.materialize_builtin_scripts(package_name, script_dir)
-        return package_dir
+    def workspace_apk_path(self, app: AppContext) -> Path:
+        safe_name = self._sanitize_filename_component(app.name, app.identifier)
+        safe_version = self._sanitize_filename_component(app.version, "unknown")
+        return self.workspace_dir(app.identifier) / f"{safe_name}_{safe_version}.apk"
 
     def pull_current_apk(self, app: AppContext) -> Path:
         # 把当前应用 APK 拉到本地工作目录。
-        local_apk_path = self.workspace_dir(app.identifier) / (
-            f"{app.name.replace(' ', '')}_{app.version}.apk"
-        )
+        local_apk_path = self.workspace_apk_path(app)
         remote_apk = f"{app.install_path}/{app.install_apk_filename}"
         self.context.adb_device.sync.pull(remote_apk, str(local_apk_path))
         self.context.current_local_apk_path = local_apk_path
         return local_apk_path
 
-    def create_initial_workspace(self, app: AppContext) -> Path:
-        # 首次进入某个应用时，初始化默认脚本和辅助 bat 文件。
-        package_dir = self.workspace_dir(app.identifier)
-        self.context.workspaces_dir.mkdir(parents=True, exist_ok=True)
-        package_dir.mkdir(parents=True, exist_ok=True)
-        self.context.emit(f"创建工作目录: {package_dir.name}")
+    def ensure_local_apk(self, app: AppContext, refresh: bool = False) -> Path:
+        local_apk_path = self.workspace_apk_path(app)
+        if refresh or not local_apk_path.exists():
+            return self.pull_current_apk(app)
+        self.context.current_local_apk_path = local_apk_path
+        return local_apk_path
 
+    def ensure_workspace_helpers(self, app: AppContext, package_dir: Path) -> None:
         log_hooking = (
             "@echo off\r\n"
             + "echo hooking %1 > log.txt\r\n"
@@ -174,30 +167,32 @@ class WorkspaceService:
         self.create_working_file(package_dir / "kill.bat", kill_shell)
         self.create_working_file(package_dir / "objection.bat", objection_shell)
 
+    def create_initial_workspace(self, app: AppContext) -> Path:
+        # 首次进入某个应用时，初始化默认脚本和辅助 bat 文件。
+        package_dir = self.workspace_dir(app.identifier)
+        self.context.workspaces_dir.mkdir(parents=True, exist_ok=True)
+        package_dir.mkdir(parents=True, exist_ok=True)
+        self.context.emit(f"创建工作目录: {package_dir.name}")
+        self.ensure_workspace_helpers(app, package_dir)
+
         # 为每个应用复制一份脚本副本，后续修改不会污染全局模板。
         self.materialize_builtin_scripts(app.identifier, package_dir / "js")
-
-        self.pull_current_apk(app)
+        self.ensure_local_apk(app, refresh=True)
         self.context.emit("工作目录第一次初始化完成")
         return package_dir
 
     def initialize_existing_workspace(self, app: AppContext) -> Path:
-        # 已有工作目录时补齐缺失的 APK 文件，并修正仍保留默认包名占位值的脚本。
+        # 已有工作目录时补齐缺失脚本、修正旧占位值，并刷新本地 APK 副本。
         package_dir = self.workspace_dir(app.identifier)
         self.context.workspaces_dir.mkdir(parents=True, exist_ok=True)
         package_dir.mkdir(parents=True, exist_ok=True)
+        self.ensure_workspace_helpers(app, package_dir)
         self.materialize_builtin_scripts(
             app.identifier,
             package_dir / "js",
             rewrite_existing=True,
         )
-        apk_path = package_dir / f"{app.name.replace(' ', '')}_{app.version}.apk"
-        self.context.current_local_apk_path = apk_path
-        if apk_path.is_file():
-            return package_dir
-        if apk_path.is_dir():
-            raise IsADirectoryError(f"APK 路径异常，当前是目录: {apk_path}")
-        self.pull_current_apk(app)
+        self.ensure_local_apk(app, refresh=False)
         self.context.emit("工作目录初始化完成")
         return package_dir
 

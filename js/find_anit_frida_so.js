@@ -4,8 +4,17 @@
 
 function hook_dlopen() {
     // Android 8.0 以后，很多 so 的加载都会走 android_dlopen_ext。
-    var android_dlopen_ext = Module.findExportByName(null, "android_dlopen_ext");
+    var android_dlopen_ext = null;
+    if (typeof Module !== "undefined" && typeof Module.findGlobalExportByName === "function") {
+        android_dlopen_ext = Module.findGlobalExportByName("android_dlopen_ext");
+    } else if (typeof Module !== "undefined" && typeof Module.findExportByName === "function") {
+        android_dlopen_ext = Module.findExportByName(null, "android_dlopen_ext");
+    }
     console.log("addr_android_dlopen_ext", android_dlopen_ext);
+    if (android_dlopen_ext === null) {
+        console.log("[-] 没有找到 android_dlopen_ext 导出函数");
+        return;
+    }
 
     Interceptor.attach(android_dlopen_ext, {
         onEnter: function(args) {

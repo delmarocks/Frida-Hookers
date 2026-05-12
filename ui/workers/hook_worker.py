@@ -47,7 +47,7 @@ class HookWorker(QObject):
             if self.use_spawn:
                 app = self.device_service.prepare_app_context(self.package_name)
             else:
-                app = self.device_service.ensure_app_in_foreground(self.package_name)
+                app = self.device_service.ensure_app_running(self.package_name)
             if self.ensure_workspace_flag:
                 self.workspace_service.ensure_workspace(app)
 

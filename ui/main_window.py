@@ -1,15 +1,17 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from html import escape
 from pathlib import Path
 from typing import Any
 
-from PySide6.QtCore import Qt, QThread, Signal
+from PySide6.QtCore import Qt, QThread, QTimer, Signal
 from PySide6.QtGui import QTextCursor
 from PySide6.QtWidgets import (
     QButtonGroup,
+    QCheckBox,
     QComboBox,
     QFileDialog,
     QFrame,
@@ -46,6 +48,7 @@ class MainWindowDependencies:
     session_service: Any
     workspace_service: Any
     rpc_service: Any
+    apk_scan_service: Any
     context: Any
 
 
@@ -71,18 +74,26 @@ class MainWindow(QMainWindow):
     # 5. 停止当前 Hook
     # 6. 在右侧面板实时查看日志
     log_emitted = Signal(str)
+    session_event_emitted = Signal(str, object)
     MAX_LOG_RECORDS = 3000
-    SERVER_VARIANTS = (
-        ("正常 Frida sever", "default"),
-        ("过检测 Florid sever", "florida"),
-    )
-
     def __init__(self, deps: MainWindowDependencies) -> None:
         super().__init__()
         self.deps = deps
         self.log_records: list[LogRecord] = []
         self.log_file_path: Path | None = None
         self.result_windows: list[QDialog] = []
+        self.selected_apk_scan_path: Path | None = None
+        self.current_log_match_index = -1
+        self.last_log_search_signature: tuple[str, bool, bool] | None = None
+        self.visible_log_match_positions: list[tuple[int, int]] = []
+        self.log_focus_mode = False
+        self.saved_splitter_sizes = [340, 420, 920]
+        self.last_log_view_signature: tuple[str, str, bool, bool, bool] | None = None
+        self.last_rendered_record_count = 0
+        self.log_render_timer = QTimer(self)
+        self.log_render_timer.setSingleShot(True)
+        self.log_render_timer.setInterval(50)
+        self.log_render_timer.timeout.connect(self._flush_scheduled_log_render)
 
         # 这两个线程分别服务于两个耗时场景：
         # 1. device_thread：准备环境、刷新应用列表
@@ -100,14 +111,15 @@ class MainWindow(QMainWindow):
 
         # GUI 层接管日志出口：所有 service 的日志最终都通过这个信号回到主线程显示。
         self.deps.context.log_handler = self._handle_log_from_worker
+        self.deps.context.session_event_handler = self._handle_session_event_from_worker
         self.log_emitted.connect(self.append_log)
+        self.session_event_emitted.connect(self.handle_session_event)
 
         self.script_root = self.deps.context.js_dir
 
         self.setWindowTitle("Frida-Hookers GUI 工作台")
         self.resize(1500, 920)
         self._build_ui()
-        self.sync_frida_server_variant()
         self._apply_styles()
         self.update_script_root_display()
         self.refresh_script_list()
@@ -154,7 +166,7 @@ class MainWindow(QMainWindow):
         self.splitter.setStretchFactor(0, 0)
         self.splitter.setStretchFactor(1, 0)
         self.splitter.setStretchFactor(2, 1)
-        self.splitter.setSizes([340, 420, 920])
+        self.splitter.setSizes(self.saved_splitter_sizes)
 
         self.status_bar = QStatusBar(self)
         self.setStatusBar(self.status_bar)
@@ -265,6 +277,44 @@ class MainWindow(QMainWindow):
         self.left_version_mode_status_value.setObjectName("statusValue")
         layout.addWidget(self.left_version_mode_status_value)
 
+        frida_tool_title = QLabel("Frida 工具")
+        frida_tool_title.setObjectName("panelTitle")
+        layout.addWidget(frida_tool_title)
+
+        self.stop_frida_server_button = QPushButton("停止 Frida Server")
+        self.stop_frida_server_button.clicked.connect(self.stop_frida_server)
+        layout.addWidget(self.stop_frida_server_button)
+
+        apk_scan_title = QLabel("APK扫描")
+        apk_scan_title.setObjectName("panelTitle")
+        layout.addWidget(apk_scan_title)
+
+        self.apk_scan_path_input = QLineEdit()
+        self.apk_scan_path_input.setReadOnly(True)
+        self.apk_scan_path_input.setPlaceholderText("选择一个本地 .apk 文件后开始扫描")
+        layout.addWidget(self.apk_scan_path_input)
+
+        apk_scan_button_row = QHBoxLayout()
+        apk_scan_button_row.setSpacing(8)
+
+        self.select_apk_scan_button = QPushButton("选择 APK")
+        self.select_apk_scan_button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.select_apk_scan_button.clicked.connect(self.choose_apk_for_scan)
+        apk_scan_button_row.addWidget(self.select_apk_scan_button)
+
+        self.start_apk_scan_button = QPushButton("开始扫描")
+        self.start_apk_scan_button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.start_apk_scan_button.setDisabled(True)
+        self.start_apk_scan_button.clicked.connect(self.start_apk_scan)
+        apk_scan_button_row.addWidget(self.start_apk_scan_button)
+
+        layout.addLayout(apk_scan_button_row)
+
+        self.apk_scan_status_label = QLabel("当前未选择 APK")
+        self.apk_scan_status_label.setWordWrap(True)
+        self.apk_scan_status_label.setObjectName("statusValue")
+        layout.addWidget(self.apk_scan_status_label)
+
         layout.addStretch(1)
         return panel
 
@@ -286,41 +336,31 @@ class MainWindow(QMainWindow):
         form.setVerticalSpacing(10)
         layout.addLayout(form)
 
-        server_label = QLabel("Frida sever选择")
-        self.frida_server_combo = QComboBox()
-        self.frida_server_combo.setEditable(False)
-        self.frida_server_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        for label, variant in self.SERVER_VARIANTS:
-            self.frida_server_combo.addItem(label, variant)
-        self.frida_server_combo.currentIndexChanged.connect(self.on_frida_server_variant_changed)
-        form.addWidget(server_label, 0, 0)
-        form.addWidget(self._with_dropdown_marker(self.frida_server_combo), 0, 1)
-
         self.refresh_apps_button = QPushButton("准备环境并刷新 App")
         self.refresh_apps_button.clicked.connect(self.start_device_prepare)
-        form.addWidget(self.refresh_apps_button, 1, 0, 1, 2)
+        form.addWidget(self.refresh_apps_button, 0, 0, 1, 2)
 
         app_label = QLabel("目标 App")
         self.app_combo = QComboBox()
         self.app_combo.setEditable(False)
         self.app_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.app_combo.currentIndexChanged.connect(self.on_package_changed)
-        form.addWidget(app_label, 2, 0)
-        form.addWidget(self._with_dropdown_marker(self.app_combo), 2, 1)
+        form.addWidget(app_label, 1, 0)
+        form.addWidget(self._with_dropdown_marker(self.app_combo), 1, 1)
 
         workspace_label = QLabel("工作目录")
         self.workspace_path_input = QLineEdit()
         self.workspace_path_input.setReadOnly(True)
         self.workspace_path_input.setPlaceholderText(
-            "选择 App 后自动创建并显示 workspaces/<package>/ 工作目录"
+            "选择 App 后显示目标工作目录；点击初始化后才会真正创建和补齐文件"
         )
-        form.addWidget(workspace_label, 3, 0)
-        form.addWidget(self.workspace_path_input, 3, 1)
+        form.addWidget(workspace_label, 2, 0)
+        form.addWidget(self.workspace_path_input, 2, 1)
 
-        self.prepare_workspace_button = QPushButton("初始化工作目录并拉取 APK")
+        self.prepare_workspace_button = QPushButton("初始化工作目录并刷新列表")
         self.prepare_workspace_button.clicked.connect(self.prepare_selected_workspace)
         self.prepare_workspace_button.setDisabled(True)
-        form.addWidget(self.prepare_workspace_button, 4, 0, 1, 2)
+        form.addWidget(self.prepare_workspace_button, 3, 0, 1, 2)
 
         mode_label = QLabel("注入模式")
         mode_row = QHBoxLayout()
@@ -335,8 +375,8 @@ class MainWindow(QMainWindow):
         mode_row.addWidget(self.attach_mode_radio)
         mode_row.addWidget(self.spawn_mode_radio)
         mode_row.addStretch(1)
-        form.addWidget(mode_label, 5, 0)
-        form.addLayout(mode_row, 5, 1)
+        form.addWidget(mode_label, 4, 0)
+        form.addLayout(mode_row, 4, 1)
 
         # 调试工具区把 CLI 里已有的高频分析能力接到 GUI。
         debug_title = QLabel("调试工具")
@@ -453,22 +493,74 @@ class MainWindow(QMainWindow):
         self.log_filter_combo = QComboBox()
         self.log_filter_combo.addItems(["全部日志", "只看 [JS]", "只看错误"])
         self.log_filter_combo.addItem("只看调试工具")
-        self.log_filter_combo.currentIndexChanged.connect(self.render_logs)
+        self.log_filter_combo.currentIndexChanged.connect(self.on_log_view_controls_changed)
         tools_row.addWidget(self._with_dropdown_marker(self.log_filter_combo), 1)
 
-        self.choose_log_file_button = QPushButton("选择日志文件")
+        self.choose_log_file_button = QPushButton("日志文件")
+        self.choose_log_file_button.setObjectName("compactButton")
+        self.choose_log_file_button.setToolTip("未启用日志文件保存")
         self.choose_log_file_button.clicked.connect(self.choose_log_file)
         tools_row.addWidget(self.choose_log_file_button)
 
-        self.clear_log_button = QPushButton("清空显示")
+        self.clear_log_button = QPushButton("清空")
+        self.clear_log_button.setObjectName("compactButton")
+        self.clear_log_button.setToolTip("只清空当前 GUI 日志显示，不删除已保存日志文件")
         self.clear_log_button.clicked.connect(self.clear_logs)
         tools_row.addWidget(self.clear_log_button)
+
+        self.toggle_log_focus_button = QPushButton("专注日志")
+        self.toggle_log_focus_button.setObjectName("compactButton")
+        self.toggle_log_focus_button.setToolTip("一键最大化右侧日志区")
+        self.toggle_log_focus_button.clicked.connect(self.toggle_log_focus_mode)
+        tools_row.addWidget(self.toggle_log_focus_button)
         layout.addLayout(tools_row)
 
-        self.log_file_input = QLineEdit()
-        self.log_file_input.setReadOnly(True)
-        self.log_file_input.setPlaceholderText("未启用日志文件保存")
-        layout.addWidget(self.log_file_input)
+        search_row = QHBoxLayout()
+        search_row.setSpacing(8)
+
+        self.log_search_input = QLineEdit()
+        self.log_search_input.setPlaceholderText("搜索终端信息")
+        self.log_search_input.textChanged.connect(self.on_log_search_changed)
+        self.log_search_input.returnPressed.connect(self.find_next_log_match)
+        search_row.addWidget(self.log_search_input, 1)
+
+        self.prev_log_match_button = QPushButton("上一条")
+        self.prev_log_match_button.setObjectName("compactButton")
+        self.prev_log_match_button.clicked.connect(self.find_previous_log_match)
+        self.prev_log_match_button.setDisabled(True)
+        search_row.addWidget(self.prev_log_match_button)
+
+        self.next_log_match_button = QPushButton("下一条")
+        self.next_log_match_button.setObjectName("compactButton")
+        self.next_log_match_button.clicked.connect(self.find_next_log_match)
+        self.next_log_match_button.setDisabled(True)
+        search_row.addWidget(self.next_log_match_button)
+
+        self.clear_log_search_button = QPushButton("清空搜索")
+        self.clear_log_search_button.setObjectName("compactButton")
+        self.clear_log_search_button.clicked.connect(self.clear_log_search)
+        search_row.addWidget(self.clear_log_search_button)
+        layout.addLayout(search_row)
+
+        status_row = QHBoxLayout()
+        status_row.setSpacing(12)
+
+        self.log_search_status_label = QLabel("当前范围：全部日志 | 搜索结果：-")
+        self.log_search_status_label.setObjectName("statusValue")
+        status_row.addWidget(self.log_search_status_label, 1)
+
+        self.log_search_case_checkbox = QCheckBox("区分大小写")
+        self.log_search_case_checkbox.toggled.connect(self.on_log_search_changed)
+        status_row.addWidget(self.log_search_case_checkbox)
+
+        self.log_search_regex_checkbox = QCheckBox("正则搜索")
+        self.log_search_regex_checkbox.toggled.connect(self.on_log_search_changed)
+        status_row.addWidget(self.log_search_regex_checkbox)
+
+        self.log_search_matches_only_checkbox = QCheckBox("仅显示匹配项")
+        self.log_search_matches_only_checkbox.toggled.connect(self.on_log_search_changed)
+        status_row.addWidget(self.log_search_matches_only_checkbox)
+        layout.addLayout(status_row)
 
         self.log_console = QTextEdit()
         self.log_console.setReadOnly(True)
@@ -584,12 +676,17 @@ class MainWindow(QMainWindow):
             QPushButton#dangerButton:hover {
                 background: #d96060;
             }
+            QPushButton#compactButton {
+                padding: 8px 10px;
+                border-radius: 10px;
+                font-size: 13px;
+            }
             QTextEdit {
                 background: #101512;
                 color: #3cff70;
                 border: 1px solid #253228;
                 font-family: Consolas, "Courier New", monospace;
-                font-size: 13px;
+                font-size: 12px;
             }
             QRadioButton {
                 spacing: 8px;
@@ -638,10 +735,60 @@ class MainWindow(QMainWindow):
         self.workspace_path_input.clear()
         self.workspace_path_input.setToolTip("")
 
+    def update_apk_scan_display(self) -> None:
+        if self.selected_apk_scan_path is None:
+            self.apk_scan_path_input.clear()
+            self.apk_scan_path_input.setToolTip("")
+            self.apk_scan_status_label.setText("当前未选择 APK")
+            self.start_apk_scan_button.setDisabled(True)
+            return
+
+        self.apk_scan_path_input.setText(self.shorten_path(self.selected_apk_scan_path))
+        self.apk_scan_path_input.setToolTip(str(self.selected_apk_scan_path))
+        self.apk_scan_status_label.setText(f"当前扫描目标：{self.selected_apk_scan_path.name}")
+        self.start_apk_scan_button.setDisabled(False)
+
     def _handle_log_from_worker(self, message: str) -> None:
         # 任何线程里的日志都不要直接操作 Qt 控件，
         # 统一转成信号，交回主线程更新界面。
         self.log_emitted.emit(message)
+
+    def _handle_session_event_from_worker(
+        self,
+        event_type: str,
+        payload: dict[str, Any],
+    ) -> None:
+        # 会话 detached 等事件可能来自 Frida 后台线程，这里统一切回主线程。
+        self.session_event_emitted.emit(event_type, payload)
+
+    def handle_session_event(self, event_type: str, payload: Any) -> None:
+        if event_type != "detached":
+            return
+        if not isinstance(payload, dict):
+            payload = {}
+
+        package_name = str(payload.get("package_name") or self.selected_package_name() or "")
+        mode = str(payload.get("mode") or "attach")
+        reason = str(payload.get("reason") or "unknown")
+        old_pid = payload.get("old_pid")
+        new_pid = payload.get("new_pid")
+
+        if new_pid is not None and old_pid is not None and new_pid != old_pid:
+            self.current_state_label.setText(
+                f"状态：{mode} 会话已断开 | PID 变化 {old_pid} -> {new_pid}"
+            )
+            self.status_bar.showMessage(
+                f"{mode} 会话已断开，检测到新 PID：{new_pid}，请重新附加"
+            )
+        else:
+            self.current_state_label.setText(
+                f"状态：{mode} 会话已断开 | reason: {reason}"
+            )
+            self.status_bar.showMessage(f"{mode} 会话已断开，请重新附加")
+
+        self.start_hook_button.setDisabled(False)
+        self.stop_hook_button.setDisabled(True)
+        self.refresh_app_status_panel(package_name or None)
 
     def classify_log(self, message: str) -> LogRecord:
         # 根据日志前缀和关键词做粗粒度分类。
@@ -703,25 +850,256 @@ class MainWindow(QMainWindow):
             return record.category == "tool"
         return True
 
+    def current_log_filter_scope(self) -> str:
+        filter_name = self.log_filter_combo.currentText()
+        if filter_name == "全部日志":
+            return "全部日志"
+        return filter_name
+
+    def toggle_log_focus_mode(self) -> None:
+        if not self.log_focus_mode:
+            self.saved_splitter_sizes = self.splitter.sizes()
+            total_width = max(sum(self.saved_splitter_sizes), self.width())
+            self.script_scroll.hide()
+            self.control_scroll.hide()
+            self.splitter.setHandleWidth(0)
+            self.log_panel.show()
+            self.splitter.setSizes([0, 0, total_width])
+            self.log_focus_mode = True
+            self.toggle_log_focus_button.setText("恢复布局")
+            self.toggle_log_focus_button.setToolTip("退出专注日志模式并恢复原布局")
+            self.status_bar.showMessage("已进入专注日志模式")
+            return
+
+        self.script_scroll.show()
+        self.control_scroll.show()
+        self.splitter.setHandleWidth(8)
+        self.log_focus_mode = False
+        self.toggle_log_focus_button.setText("专注日志")
+        self.toggle_log_focus_button.setToolTip("一键最大化右侧日志区")
+        self.splitter.setSizes(self.saved_splitter_sizes)
+        self.status_bar.showMessage("已恢复默认布局")
+
+    def log_search_keyword(self) -> str:
+        return self.log_search_input.text().strip()
+
+    def log_search_signature(self) -> tuple[str, bool, bool]:
+        return (
+            self.log_search_keyword(),
+            self.log_search_case_checkbox.isChecked(),
+            self.log_search_regex_checkbox.isChecked(),
+        )
+
+    def current_log_view_signature(self) -> tuple[str, str, bool, bool, bool]:
+        return (
+            self.log_filter_combo.currentText(),
+            self.log_search_keyword(),
+            self.log_search_case_checkbox.isChecked(),
+            self.log_search_regex_checkbox.isChecked(),
+            self.log_search_matches_only_checkbox.isChecked(),
+        )
+
+    def on_log_view_controls_changed(self) -> None:
+        self.render_logs()
+
+    def on_log_search_changed(self) -> None:
+        signature = self.log_search_signature()
+        if signature != self.last_log_search_signature:
+            self.current_log_match_index = 0 if signature[0] else -1
+            self.last_log_search_signature = signature
+        self.render_logs()
+
+    def clear_log_search(self) -> None:
+        self.log_search_input.clear()
+
+    def compile_log_search_pattern(self) -> tuple[re.Pattern[str] | None, str | None]:
+        keyword = self.log_search_keyword()
+        if not keyword:
+            return None, None
+
+        flags = 0 if self.log_search_case_checkbox.isChecked() else re.IGNORECASE
+        pattern_text = keyword if self.log_search_regex_checkbox.isChecked() else re.escape(keyword)
+        try:
+            return re.compile(pattern_text, flags), None
+        except re.error as exc:
+            return None, str(exc)
+
+    def find_next_log_match(self) -> None:
+        keyword = self.log_search_keyword()
+        if not keyword:
+            return
+        total = getattr(self, "visible_log_match_count", 0)
+        if total <= 0:
+            return
+        if self.current_log_match_index < 0:
+            self.current_log_match_index = 0
+        else:
+            self.current_log_match_index = (self.current_log_match_index + 1) % total
+        self.render_logs()
+
+    def find_previous_log_match(self) -> None:
+        keyword = self.log_search_keyword()
+        if not keyword:
+            return
+        total = getattr(self, "visible_log_match_count", 0)
+        if total <= 0:
+            return
+        if self.current_log_match_index < 0:
+            self.current_log_match_index = total - 1
+        else:
+            self.current_log_match_index = (self.current_log_match_index - 1) % total
+        self.render_logs()
+
+    def highlight_log_text(
+        self,
+        message: str,
+        pattern: re.Pattern[str] | None,
+        global_match_start: int,
+    ) -> tuple[str, int]:
+        if pattern is None:
+            return escape(message), 0
+
+        highlighted_parts: list[str] = []
+        match_count = 0
+        last_end = 0
+
+        for match in pattern.finditer(message):
+            start, end = match.span()
+            if start == end:
+                continue
+            highlighted_parts.append(escape(message[last_end:start]))
+            color = "#ffd54f"
+            if global_match_start + match_count == self.current_log_match_index:
+                color = "#ff8a65"
+            highlighted_parts.append(
+                f'<span style="background-color: {color}; color: #1f1f1f; border-radius: 2px;">'
+                f"{escape(match.group(0))}"
+                "</span>"
+            )
+            last_end = end
+            match_count += 1
+
+        if match_count == 0:
+            return escape(message), 0
+
+        highlighted_parts.append(escape(message[last_end:]))
+        return "".join(highlighted_parts), match_count
+
+    def focus_current_log_match(self) -> None:
+        if self.current_log_match_index < 0:
+            return
+        if self.current_log_match_index >= len(self.visible_log_match_positions):
+            return
+
+        position, length = self.visible_log_match_positions[self.current_log_match_index]
+        cursor = QTextCursor(self.log_console.document())
+        cursor.setPosition(position)
+        cursor.setPosition(position + max(length, 1), QTextCursor.KeepAnchor)
+        self.log_console.setTextCursor(cursor)
+        self.log_console.ensureCursorVisible()
+
+    def can_incrementally_append_log(self, record: LogRecord, overflow: int) -> bool:
+        if overflow > 0:
+            return False
+        if self.log_search_keyword():
+            return False
+        current_signature = self.current_log_view_signature()
+        if self.last_log_view_signature != current_signature:
+            return False
+        return True
+
+    def append_log_record_to_console(self, record: LogRecord) -> None:
+        if not self.should_show_log(record):
+            return
+        cursor = self.log_console.textCursor()
+        cursor.movePosition(QTextCursor.End)
+        cursor.insertHtml(
+            f'<div style="color: {self.log_color(record)}; white-space: pre-wrap;">'
+            f"{escape(record.message)}"
+            "</div>"
+        )
+        self.log_console.setTextCursor(cursor)
+        self.log_console.ensureCursorVisible()
+
+    def schedule_log_render(self) -> None:
+        if not self.log_render_timer.isActive():
+            self.log_render_timer.start()
+
+    def _flush_scheduled_log_render(self) -> None:
+        self.render_logs()
+
     def render_logs(self) -> None:
         # 重新渲染日志区。
         #
         # 过滤条件切换时直接基于内存中的结构化日志重绘，
         # 而不是去解析 QTextEdit 里的文本。
+        if self.log_render_timer.isActive():
+            self.log_render_timer.stop()
+        keyword = self.log_search_keyword()
+        pattern, pattern_error = self.compile_log_search_pattern()
+        matches_only = self.log_search_matches_only_checkbox.isChecked() and bool(keyword) and pattern_error is None
         html_lines: list[str] = []
+        total_matches = 0
+        self.visible_log_match_positions = []
+        plain_text_offset = 0
         for record in self.log_records:
             if not self.should_show_log(record):
                 continue
+            message_html, match_count = self.highlight_log_text(record.message, pattern, total_matches)
+            if matches_only and match_count == 0:
+                continue
+            if pattern is not None:
+                for match in pattern.finditer(record.message):
+                    start, end = match.span()
+                    if start == end:
+                        continue
+                    self.visible_log_match_positions.append((plain_text_offset + start, end - start))
             html_lines.append(
                 f'<div style="color: {self.log_color(record)}; white-space: pre-wrap;">'
-                f"{escape(record.message)}"
+                f"{message_html}"
                 "</div>"
             )
+            total_matches += match_count
+            plain_text_offset += len(record.message) + 1
+
+        self.visible_log_match_count = total_matches
+        scope_text = self.current_log_filter_scope()
+        if matches_only:
+            scope_text = f"{scope_text} | 仅显示匹配项"
+        if keyword:
+            if pattern_error:
+                self.current_log_match_index = -1
+                self.log_search_status_label.setText(
+                    f"当前范围：{scope_text} | 搜索结果：正则无效"
+                )
+            elif total_matches == 0:
+                self.current_log_match_index = -1
+                self.log_search_status_label.setText(
+                    f"当前范围：{scope_text} | 搜索结果：0 / 0"
+                )
+            else:
+                if self.current_log_match_index < 0:
+                    self.current_log_match_index = 0
+                elif self.current_log_match_index >= total_matches:
+                    self.current_log_match_index = total_matches - 1
+                self.log_search_status_label.setText(
+                    f"当前范围：{scope_text} | 搜索结果：{self.current_log_match_index + 1} / {total_matches}"
+                )
+        else:
+            self.current_log_match_index = -1
+            self.log_search_status_label.setText(f"当前范围：{scope_text} | 搜索结果：-")
 
         self.log_console.setUpdatesEnabled(False)
         self.log_console.setHtml("".join(html_lines))
-        self.log_console.moveCursor(QTextCursor.End)
+        if keyword and total_matches > 0 and self.current_log_match_index >= 0 and not pattern_error:
+            self.focus_current_log_match()
+        else:
+            self.log_console.moveCursor(QTextCursor.End)
         self.log_console.setUpdatesEnabled(True)
+        self.prev_log_match_button.setDisabled(total_matches <= 0 or pattern_error is not None)
+        self.next_log_match_button.setDisabled(total_matches <= 0 or pattern_error is not None)
+        self.last_log_view_signature = self.current_log_view_signature()
+        self.last_rendered_record_count = len(self.log_records)
 
     def persist_log(self, message: str) -> None:
         # 如果用户选择了日志文件，就把原始文本同步落盘。
@@ -760,15 +1138,18 @@ class MainWindow(QMainWindow):
             return
 
         self.log_file_path = selected_path
-        self.log_file_input.setText(str(self.log_file_path))
+        self.choose_log_file_button.setToolTip(str(self.log_file_path))
         self.append_log(f"[*] 日志文件已启用：{self.log_file_path}")
 
     def clear_logs(self) -> None:
         # 清空界面中的日志缓存和显示。
         #
         # 这里只清空 GUI 内存和面板，不删除已经写入磁盘的日志文件。
+        if self.log_render_timer.isActive():
+            self.log_render_timer.stop()
         self.log_records.clear()
-        self.log_console.clear()
+        self.last_rendered_record_count = 0
+        self.render_logs()
         self.status_bar.showMessage("日志显示已清空")
 
     def append_log(self, message: str) -> None:
@@ -781,21 +1162,28 @@ class MainWindow(QMainWindow):
         self.log_records.append(record)
 
         # 做一层简单的内存保护，避免高频日志长时间运行后把 GUI 拖慢。
+        overflow = 0
         if len(self.log_records) > self.MAX_LOG_RECORDS:
             overflow = len(self.log_records) - self.MAX_LOG_RECORDS
             del self.log_records[:overflow]
 
         self.persist_log(record.message)
-        self.render_logs()
+        if self.can_incrementally_append_log(record, overflow):
+            self.append_log_record_to_console(record)
+            self.last_rendered_record_count = len(self.log_records)
+        else:
+            self.schedule_log_render()
 
     def set_busy(self, busy: bool, message: str | None = None) -> None:
         # 统一管理按钮禁用状态，避免多个分支各自写一套启停逻辑。
         self.refresh_apps_button.setDisabled(busy)
-        self.frida_server_combo.setDisabled(busy)
         # 活动会话存在时，不允许再次启动注入。
         self.start_hook_button.setDisabled(busy or self.deps.context.active_session is not None)
         self.select_script_dir_button.setDisabled(busy)
         self.reload_script_dir_button.setDisabled(busy)
+        self.select_apk_scan_button.setDisabled(busy)
+        self.start_apk_scan_button.setDisabled(busy or self.selected_apk_scan_path is None)
+        self.stop_frida_server_button.setDisabled(busy)
         self.prepare_workspace_button.setDisabled(busy)
         self.attach_mode_radio.setDisabled(busy)
         self.spawn_mode_radio.setDisabled(busy)
@@ -813,6 +1201,60 @@ class MainWindow(QMainWindow):
         if message:
             self.current_state_label.setText(f"状态：{message}")
             self.status_bar.showMessage(message)
+
+    def choose_apk_for_scan(self) -> None:
+        selected, _ = QFileDialog.getOpenFileName(
+            self,
+            "选择 APK 文件",
+            str(self.deps.context.project_root),
+            "APK Files (*.apk);;All Files (*.*)",
+        )
+        if not selected:
+            return
+
+        selected_path = Path(selected)
+        self.selected_apk_scan_path = selected_path
+        self.update_apk_scan_display()
+        self.append_log(f"[*] 已选择 APK 扫描目标：{selected_path}")
+
+    def start_apk_scan(self) -> None:
+        if self.selected_apk_scan_path is None:
+            QMessageBox.warning(self, "未选择 APK", "请先选择一个本地 APK 文件。")
+            return
+
+        apk_path = self.selected_apk_scan_path
+
+        def action() -> dict[str, Any]:
+            self.deps.context.emit(f"[*] 开始扫描 APK：{apk_path}")
+            self.deps.context.emit(
+                f"[*] 使用扫描工具：{self.deps.context.local_apk_check_pack_exe}"
+            )
+            result = self.deps.apk_scan_service.scan_apk(apk_path)
+            if result["stdout"]:
+                self.deps.context.emit("[TOOL] APK 扫描输出：")
+                for line in str(result["stdout"]).splitlines():
+                    self.deps.context.emit(f"[TOOL] {line}")
+            if result["stderr"]:
+                self.deps.context.emit("[TOOL] APK 扫描错误输出：")
+                for line in str(result["stderr"]).splitlines():
+                    self.deps.context.emit(f"[TOOL] {line}")
+            if int(result["returncode"]) != 0:
+                raise RuntimeError(
+                    f"APK 扫描失败，退出码：{result['returncode']}"
+                )
+            return result
+
+        self.start_action(
+            busy_message="正在扫描 APK",
+            action=action,
+            on_success=self.on_apk_scan_succeeded,
+        )
+
+    def on_apk_scan_succeeded(self, payload: Any) -> None:
+        apk_path = str(payload["apk_path"])
+        self.append_log(f"[+] APK 扫描完成：{apk_path}")
+        self.status_bar.showMessage("APK 扫描完成")
+        self.set_busy(False, "APK 扫描完成")
 
     def choose_script_directory(self) -> None:
         # 允许用户切换到项目外的脚本目录，方便把 GUI 当成一个通用 Frida 工作台。
@@ -918,23 +1360,26 @@ class MainWindow(QMainWindow):
             self.refresh_app_status_panel(None)
             return
 
-        workspace_dir = self.deps.workspace_service.ensure_workspace_shell(package_name)
+        workspace_dir = self.deps.workspace_service.workspace_dir(package_name)
         script_dir = self.deps.workspace_service.script_dir(package_name)
         self.prepare_workspace_button.setDisabled(False)
 
         self.workspace_path_input.setText(str(workspace_dir))
         self.workspace_path_input.setToolTip(str(workspace_dir))
 
-        self.script_root = script_dir
+        self.script_root = script_dir if script_dir.is_dir() else self.deps.context.js_dir
         self.update_script_root_display()
         self.refresh_script_list()
         self.refresh_app_status_panel(package_name)
 
         self.append_log(f"[*] 当前工作目录：{workspace_dir}")
-        self.append_log(f"[*] 当前脚本目录已切换到：{script_dir}")
+        if script_dir.is_dir():
+            self.append_log(f"[*] 当前脚本目录已切换到：{script_dir}")
+        else:
+            self.append_log("[*] 当前工作目录尚未初始化，暂时使用项目内置 js 脚本目录。")
 
     def prepare_selected_workspace(self) -> None:
-        # 显式初始化当前选中 App 的完整工作目录，并在需要时拉取 APK。
+        # 显式初始化当前选中 App 的完整工作目录，并刷新脚本列表。
         package_name = self.selected_package_name()
         if not package_name:
             QMessageBox.warning(self, "未选择 App", "请先选择一个目标 App。")
@@ -942,11 +1387,11 @@ class MainWindow(QMainWindow):
         self.start_workspace_prepare(package_name)
 
     def start_workspace_prepare(self, package_name: str) -> None:
-        # 完整初始化工作目录，并在需要时拉取 APK。
+        # 完整初始化工作目录，并刷新脚本列表。
         if self.workspace_thread is not None:
             return
 
-        self.set_busy(True, "正在初始化工作目录并拉取 APK")
+        self.set_busy(True, "正在初始化工作目录并刷新列表")
         self.workspace_thread = QThread(self)
         self.workspace_worker = WorkspaceWorker(
             device_service=self.deps.device_service,
@@ -990,7 +1435,6 @@ class MainWindow(QMainWindow):
         if self.device_thread is not None:
             return
 
-        self.sync_frida_server_variant()
         self.clear_workspace_display()
         self.app_combo.blockSignals(True)
         self.app_combo.setCurrentIndex(-1)
@@ -1000,16 +1444,12 @@ class MainWindow(QMainWindow):
         self.script_root = self.deps.context.js_dir
         self.update_script_root_display()
         self.refresh_script_list()
-        self.append_log(
-            f"[*] 本次准备环境使用的 Frida Server：{self.frida_server_combo.currentText()}"
-        )
+        self.append_log(f"[*] 本次准备环境使用的 Frida Server：{self.deps.context.frida_server_arm64}")
         self.append_log("[*] 开始准备设备环境并刷新 App 列表...")
         self.set_busy(True, "正在准备设备环境")
 
         self.device_thread = QThread(self)
-        self.device_worker = DeviceWorker(
-            device_service=self.deps.device_service,
-        )
+        self.device_worker = DeviceWorker(device_service=self.deps.device_service)
         self.device_worker.moveToThread(self.device_thread)
 
         # 线程启动后执行 worker.run()，
@@ -1023,29 +1463,16 @@ class MainWindow(QMainWindow):
         self.device_thread.finished.connect(self._clear_device_thread)
         self.device_thread.start()
 
-    def current_frida_server_variant(self) -> str:
-        value = self.frida_server_combo.currentData()
-        if value is None:
-            return "default"
-        return str(value)
-
-    def sync_frida_server_variant(self) -> None:
-        self.deps.context.frida_server_variant = self.current_frida_server_variant()
-
-    def on_frida_server_variant_changed(self) -> None:
-        self.sync_frida_server_variant()
-        label = self.frida_server_combo.currentText() or "默认 Frida Server"
-        if hasattr(self, "status_bar"):
-            self.status_bar.showMessage(f"当前 Frida Server 已切换为：{label}")
-        if hasattr(self, "log_console"):
-            self.append_log(f"[*] 当前 Frida Server 类型：{label}")
-
     def _clear_device_thread(self) -> None:
         # 把 Python 层的引用清空，允许后续再次点击“准备环境”。
         self.device_thread = None
         self.device_worker = None
 
-    def on_apps_ready(self, apps: list[dict[str, Any]]) -> None:
+    def on_apps_ready(
+        self,
+        apps: list[dict[str, Any]],
+        foreground_package: Any = None,
+    ) -> None:
         # 收到后台线程返回的应用列表后，刷新下拉框。
         self.deps.rpc_service.invalidate_persistent_session()
         self.app_combo.blockSignals(True)
@@ -1058,17 +1485,31 @@ class MainWindow(QMainWindow):
             if pid is not None:
                 label = f"[{pid}] {label}"
             self.app_combo.addItem(label, identifier)
-        self.app_combo.setCurrentIndex(-1)
+        selected_index = -1
+        if isinstance(foreground_package, str) and foreground_package:
+            selected_index = self.app_combo.findData(foreground_package)
+        self.app_combo.setCurrentIndex(selected_index)
         self.app_combo.blockSignals(False)
-        self.prepare_workspace_button.setDisabled(True)
-        self.clear_workspace_display()
+        if selected_index < 0:
+            self.prepare_workspace_button.setDisabled(True)
+            self.clear_workspace_display()
+        else:
+            self.on_package_changed()
 
         self.set_busy(False, f"已同步设备 {len(apps)} 个应用")
         self.append_log(f"[v] 已同步设备 {len(apps)} 个进程/应用")
         if apps:
             self.current_state_label.setText("状态：环境已就绪，可以开始注入")
-            self.append_log("[*] 准备已完成，请选择目标 APP。")
-            QMessageBox.information(self, "准备已完成", "准备已完成，请选择目标 APP。")
+            if selected_index >= 0 and isinstance(foreground_package, str):
+                self.append_log(f"[*] 已自动选中当前前台 App：{foreground_package}")
+                QMessageBox.information(
+                    self,
+                    "准备已完成",
+                    f"准备已完成，已自动选中当前前台 App：{foreground_package}",
+                )
+            else:
+                self.append_log("[*] 准备已完成，请选择目标 APP。")
+                QMessageBox.information(self, "准备已完成", "准备已完成，请选择目标 APP。")
         else:
             self.current_state_label.setText("状态：环境已就绪，但没有枚举到应用")
             self.append_log("[!] 准备已完成，但当前没有枚举到可选择的 APK 包名。")
@@ -1117,7 +1558,8 @@ class MainWindow(QMainWindow):
     def ensure_current_app_ready(self) -> str:
         # GUI 里的分析类动作不一定要求已经开始注入，
         # 但它们都需要一个有效的 current_app 上下文。
-        # 这里统一负责把包名校验、拉前台、回填 current_app 串起来。
+        # 这里统一负责把包名校验、校验运行态、回填 current_app 串起来，
+        # 不再主动把目标 App 拉到前台。
         package_name = self.selected_package_name()
         if not package_name:
             raise RuntimeError("请先选择一个目标 App")
@@ -1140,7 +1582,7 @@ class MainWindow(QMainWindow):
             self.refresh_app_status_panel(current_app.identifier)
             return current_app.identifier
 
-        app = self.deps.device_service.ensure_app_in_foreground(package_name)
+        app = self.deps.device_service.ensure_app_running(package_name)
         workspace_dir = self.deps.workspace_service.workspace_dir(app.identifier)
         self.workspace_path_input.setText(str(workspace_dir))
         self.workspace_path_input.setToolTip(str(workspace_dir))
@@ -1278,6 +1720,31 @@ class MainWindow(QMainWindow):
         self.current_state_label.setText("状态：会话已停止")
         self.status_bar.showMessage("当前 Hook 已停止")
         self.append_log("[*] 当前 Hook 已停止")
+        self.start_hook_button.setDisabled(False)
+        self.stop_hook_button.setDisabled(True)
+        self.refresh_app_status_panel()
+        self.set_busy(False, "Ready")
+
+    def stop_frida_server(self) -> None:
+        if self.action_thread is not None:
+            return
+
+        def action() -> None:
+            self.deps.rpc_service.invalidate_persistent_session()
+            if self.deps.context.active_session is not None:
+                self.deps.session_service.stop_active_session()
+            self.deps.device_service.stop_frida_server()
+
+        self.start_action(
+            busy_message="正在停止 Frida Server",
+            action=action,
+            on_success=self.on_frida_server_stopped,
+        )
+
+    def on_frida_server_stopped(self, _payload: Any) -> None:
+        self.current_state_label.setText("状态：Frida Server 已停止")
+        self.status_bar.showMessage("Frida Server 已停止")
+        self.append_log("[*] Frida Server 已停止")
         self.start_hook_button.setDisabled(False)
         self.stop_hook_button.setDisabled(True)
         self.refresh_app_status_panel()
@@ -1458,7 +1925,7 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event) -> None:  # noqa: N802
         # 关闭窗口时尽量做一次温和清理：
         # 1. 停止当前 Hook
-        # 2. 清理 /data/local/tmp/fr 下部署过的 sever 文件
+        # 2. 不再清理设备侧 rusda 文件，避免某些设备因此崩溃/重启
         # 3. 不强杀线程，让 Qt 走正常收尾流程
         try:
             self.deps.rpc_service.invalidate_persistent_session()
@@ -1466,10 +1933,6 @@ class MainWindow(QMainWindow):
             pass
         try:
             self.deps.session_service.stop_active_session()
-        except Exception:
-            pass
-        try:
-            self.deps.device_service.cleanup_remote_frida_files()
         except Exception:
             pass
         super().closeEvent(event)

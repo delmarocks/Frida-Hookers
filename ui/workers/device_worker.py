@@ -13,7 +13,7 @@ class DeviceWorker(QObject):
     # 2. 启动 frida-server 可能阻塞
     # 3. 枚举应用列表也可能比较慢
     # 如果直接在主线程执行，GUI 会卡住，窗口会表现成“未响应”。
-    apps_ready = Signal(list)
+    apps_ready = Signal(list, object)
     failed = Signal(str)
     finished = Signal()
 
@@ -45,7 +45,8 @@ class DeviceWorker(QObject):
                 }
                 for app in apps
             ]
-            self.apps_ready.emit(payload)
+            foreground_package = self.device_service.get_foreground_package()
+            self.apps_ready.emit(payload, foreground_package)
         except Exception as exc:
             self.failed.emit(str(exc))
         finally:

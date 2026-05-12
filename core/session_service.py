@@ -105,6 +105,9 @@ class SessionService:
                 message.get("stack") or message.get("description") or str(message)
             )
             self.context.emit(f"[!] {error_text}")
+            hint = self._script_runtime_hint(error_text)
+            if hint:
+                self.context.emit(f"[!] {hint}")
             return
         self.context.emit(str(message))
 
@@ -113,34 +116,69 @@ class SessionService:
         self._on_message(message, data)
 
     def _load_script_code(self, script_path: Path) -> str:
-        # 读取脚本并拼上通用 warp 代码。
+        # 读取脚本，并在尾部拼接项目内置清理脚本。
         source = self.workspace_service.read_local_file(script_path)
         if source is None:
             raise FileNotFoundError(f"脚本不存在: {script_path}")
+        return self._compose_script_code(script_path, source)
+
+    def _compose_script_code(
+        self,
+        script_path: Path,
+        source: str,
+        *,
+        append_cleanup_warp: bool = True,
+    ) -> str:
         warp = self.workspace_service.get_resource_script("_hook_js_warp.js")
         # 先注入 console bridge，再加载业务脚本和清理 warp，
         # 这样 hook.js 中大量 console.log(...) 也会被宿主捕获到。
-        return CONSOLE_BRIDGE_JS + "\n\n" + source + "\n\n\n" + warp
+        return (
+            CONSOLE_BRIDGE_JS + "\n\n" + source + ("\n\n\n" + warp if append_cleanup_warp else "")
+        )
 
-    def _build_session(self, session, script, script_path: Path, mode: str) -> HookSession:
+    def _build_session(
+        self,
+        session,
+        script,
+        script_path: Path,
+        mode: str,
+        *,
+        use_v8: bool = False,
+        auto_follow_attempted: bool = False,
+        auto_follow_count: int = 0,
+    ) -> HookSession:
         # 把底层 Frida 对象包装成统一会话模型并写回上下文。
         hook_session = HookSession(
             session=session,
             script=script,
             script_path=script_path,
             mode=mode,
+            use_v8=use_v8,
+            auto_follow_attempted=auto_follow_attempted,
+            auto_follow_count=auto_follow_count,
         )
         self.context.active_session = hook_session
         return hook_session
+
+    def _script_runtime_hint(self, error_text: str) -> str | None:
+        normalized = (error_text or "").lower()
+        if "referenceerror: 'java' is not defined" in normalized or 'referenceerror: "java" is not defined' in normalized:
+            return (
+                "当前脚本依赖 Java bridge。"
+                "在 Frida 16.2.1 下这里继续报 Java 未定义时，通常意味着目标进程还没进入 Java 运行时，"
+                "或脚本注入时机过早。"
+            )
+        if "typeerror: not a function" in normalized and "hook_native_anti_debug" in normalized:
+            return (
+                "当前脚本里的 native 反调试代码疑似仍在调用旧版 Frida 全局 API。"
+                "请优先检查 Module.* / Process.* 相关写法。"
+            )
+        return None
 
     def _cleanup_transient_session(self, session, script) -> None:
         # attach/spawn 启动过程中如果在登记 active_session 之前失败，
         # 这里负责兜底释放临时创建出来的 Frida 资源，避免留下半残会话。
         if script is not None:
-            try:
-                script.exports_sync.cleanup()
-            except Exception:
-                pass
             try:
                 script.unload()
             except Exception:
@@ -181,7 +219,19 @@ class SessionService:
         session = None
         script = None
         try:
-            session = self.frida_device.attach(self._require_current_pid())
+            pid = self._require_current_pid()
+            try:
+                session = self.frida_device.attach(pid)
+            except Exception as exc:
+                refreshed_pid = self.device_service.refresh_current_app_pid(app.identifier)
+                if refreshed_pid is None or refreshed_pid == pid:
+                    raise RuntimeError(
+                        f"attach stage failed for {app.identifier} (pid {pid}): {exc}"
+                    ) from exc
+                self.context.emit(
+                    f"[*] 检测到 attach 目标 PID 已变化，重试 attach: {pid} -> {refreshed_pid}"
+                )
+                session = self.frida_device.attach(refreshed_pid)
             script = (
                 session.create_script(script_jscode, runtime="v8")
                 if use_v8
@@ -189,7 +239,7 @@ class SessionService:
             )
             script.on("message", self._on_message)
             script.load()
-            return self._build_session(session, script, script_path, "attach")
+            return self._build_session(session, script, script_path, "attach", use_v8=use_v8)
         except Exception:
             self._cleanup_transient_session(session, script)
             raise
@@ -245,7 +295,7 @@ class SessionService:
                 raise RuntimeError(
                     f"resume stage failed for {app.identifier} (pid {pid}): {exc}"
                 ) from exc
-            return self._build_session(session, script, script_path, "spawn")
+            return self._build_session(session, script, script_path, "spawn", use_v8=use_v8)
         except Exception:
             app.pid = previous_pid
             self._cleanup_transient_session(session, script)
@@ -261,21 +311,19 @@ class SessionService:
         hook_session = self.context.active_session
         if hook_session is None:
             return
+        # 先从共享上下文中摘掉当前会话，避免停止过程中 UI 仍然把它当成活跃会话。
+        self.context.active_session = None
+
         if hook_session.script is not None:
-            try:
-                hook_session.script.exports_sync.cleanup()
-            except Exception:
-                pass
             try:
                 hook_session.script.unload()
             except Exception as exc:
-                self.context.emit(f"脚本清理异常: {exc}")
+                self.context.emit(f"脚本卸载异常: {exc}")
         if hook_session.session is not None:
             try:
                 hook_session.session.detach()
             except Exception as exc:
                 self.context.emit(f"会话清理异常: {exc}")
-        self.context.active_session = None
 
     def restart_current_app(self) -> None:
         # 重启当前应用，并把新的 PID 回写到上下文。

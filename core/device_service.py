@@ -29,9 +29,68 @@ class DeviceService:
 
     def _get_frida_device(self):
         serial = getattr(self.context.adb_device, "serial", None)
+        last_error: Optional[Exception] = None
+        remote_server_name = self.get_remote_frida_server_name()
+        candidate_ports = self.get_remote_server_ports(remote_server_name)
+
         if serial:
-            return frida.get_device(serial, timeout=3)
-        return frida.get_usb_device(timeout=3)
+            try:
+                return frida.get_device(serial, timeout=3)
+            except Exception as exc:
+                last_error = exc
+        else:
+            try:
+                return frida.get_usb_device(timeout=3)
+            except Exception as exc:
+                last_error = exc
+
+        if not candidate_ports:
+            candidate_ports = [27042, 27043]
+
+        for index, port in enumerate(candidate_ports):
+            try:
+                local_port = 27052 + index
+                return self._get_forwarded_frida_device(remote_port=port, local_port=local_port)
+            except Exception as exc:
+                last_error = exc
+
+        if last_error is not None:
+            raise last_error
+        raise frida.ServerNotRunningError("Unable to find a reachable Frida device")
+
+    def _get_forwarded_frida_device(self, remote_port: int, local_port: int):
+        if self.context.adb_device is None:
+            raise RuntimeError("ADB device is not connected")
+        self._ensure_adb_forward(local_port, remote_port)
+        self.context.emit(
+            f"[*] 使用 adb forward 连接 Frida: 127.0.0.1:{local_port} -> device:{remote_port}"
+        )
+        manager = frida.get_device_manager()
+        device = manager.add_remote_device(f"127.0.0.1:{local_port}")
+        try:
+            device.enumerate_processes()
+        except Exception:
+            try:
+                manager.remove_remote_device(device)
+            except Exception:
+                pass
+            raise
+        return device
+
+    def _ensure_adb_forward(self, local_port: int, remote_port: int) -> None:
+        subprocess.run(
+            [
+                "adb",
+                "-s",
+                self.adb_device.serial,
+                "forward",
+                f"tcp:{local_port}",
+                f"tcp:{remote_port}",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
 
     def _parse_package_apk_path(self, package_name: str) -> tuple[str, str]:
         raw_output = self.adb_shell(f"pm path {package_name}")
@@ -110,12 +169,91 @@ class DeviceService:
             install_apk_filename=install_apk_filename,
         )
 
+    def ensure_app_running(self, package_name: str) -> AppContext:
+        # 为 attach 场景准备应用上下文，但不主动把应用拉到前台。
+        uid, install_path, install_apk_filename, _, version_name = self._read_app_metadata(
+            package_name
+        )
+        pid, name = self._find_running_process(package_name, refresh_apps=True)
+        if pid is None:
+            raise RuntimeError(
+                f"Attach 模式要求目标 App 已经在运行：{package_name}。"
+                " 请先手动启动目标 App，或改用 Spawn 模式。"
+            )
+        self.context.emit(f"App {package_name} 已在运行，准备直接 attach 到 pid={pid}。")
+        return self._build_app_context(
+            package_name,
+            pid=pid,
+            name=name,
+            uid=uid,
+            version_name=version_name,
+            install_path=install_path,
+            install_apk_filename=install_apk_filename,
+        )
+
+    def get_live_pid(self, package_name: str) -> Optional[int]:
+        pid, _ = self._find_running_process(package_name, refresh_apps=True)
+        return pid
+
+    def refresh_current_app_pid(self, package_name: str) -> Optional[int]:
+        pid, name = self._find_running_process(package_name, refresh_apps=True)
+        if self.context.current_app is not None and self.context.current_app.identifier == package_name:
+            self.context.current_app.pid = pid
+            if name:
+                self.context.current_app.name = name
+        return pid
+
+    def _find_running_pid_via_adb(self, package_name: str) -> Optional[int]:
+        try:
+            output = self.adb_shell(f"pidof {package_name} 2>/dev/null || true")
+        except Exception:
+            return None
+        if not output:
+            return None
+        for token in output.split():
+            try:
+                return int(token)
+            except ValueError:
+                continue
+        return None
+
+    def _resolve_process_name_by_pid(
+        self,
+        pid: int,
+        package_name: str,
+        *,
+        refresh_apps: bool = False,
+    ) -> Optional[str]:
+        if refresh_apps or not self.context.apps:
+            try:
+                self.refresh_applications()
+            except Exception:
+                pass
+
+        for app in self.context.apps:
+            if app.pid == pid and app.identifier == package_name:
+                return app.name
+
+        try:
+            process = self._get_frida_device().get_process(pid)
+            return process.name
+        except Exception:
+            return None
+
     def _find_running_process(
         self,
         package_name: str,
         *,
         refresh_apps: bool = False,
     ) -> tuple[Optional[int], Optional[str]]:
+        adb_pid = self._find_running_pid_via_adb(package_name)
+        if adb_pid is not None:
+            return adb_pid, self._resolve_process_name_by_pid(
+                adb_pid,
+                package_name,
+                refresh_apps=refresh_apps,
+            )
+
         if refresh_apps or not self.context.apps:
             self.refresh_applications()
 
@@ -178,6 +316,12 @@ class DeviceService:
         except frida.ProcessNotFoundError:
             return True
         except frida.TimedOutError:
+            remote_server_name = self.get_remote_frida_server_name()
+            ports = self.get_remote_server_ports(remote_server_name)
+            if ports:
+                self.context.emit(
+                    f"[!] {remote_server_name} 当前监听端口: {', '.join(str(port) for port in ports)}"
+                )
             return False
         except Exception as exc:
             self.context.emit(f"Frida 环境检查失败: {exc}")
@@ -195,37 +339,21 @@ class DeviceService:
             return "x86"
         return "arm64"
 
-    def get_frida_server_variant_label(self) -> str:
-        if self.context.frida_server_variant == "florida":
-            return "过检测 Florid sever"
-        return "正常 Frida sever"
+    def get_frida_server_label(self) -> str:
+        return "rusda-server-16.2.1"
 
     def get_remote_frida_server_name(self) -> str:
-        if self.context.frida_server_variant == "florida":
-            return self.context.remote_florida_server_name
-        return self.context.remote_default_frida_server_name
+        return self.context.remote_frida_server_name
 
     def get_all_remote_frida_server_names(self) -> list[str]:
-        return [
-            self.context.remote_default_frida_server_name,
-            self.context.remote_florida_server_name,
-        ]
+        return [self.context.remote_frida_server_name]
 
     def get_frida_server_file(self) -> str:
         cpu_arch = self.get_cpu_arch()
-        variant = self.context.frida_server_variant
-        if variant == "florida":
-            if cpu_arch != "arm64":
-                raise RuntimeError(
-                    f"Florida 当前仅支持 arm64 设备，当前架构为: {cpu_arch}"
-                )
-            return self.context.florida_server_arm64
         if cpu_arch == "arm64":
             return self.context.frida_server_arm64
-        if cpu_arch == "arm":
-            return self.context.frida_server_arm
         raise RuntimeError(
-            f"当前 Frida Server 暂不支持设备架构: {cpu_arch}。请手动启动。"
+            f"当前 rusda-server-16.2.1 仅支持 arm64 设备，当前架构为: {cpu_arch}"
         )
 
     def get_remote_frida_server_path(self) -> str:
@@ -239,9 +367,45 @@ class DeviceService:
             return None
         return output.split()[0]
 
+    def get_remote_server_ports(self, remote_server_name: str) -> list[int]:
+        pid = self.get_remote_server_pid(remote_server_name)
+        if pid is None:
+            return []
+
+        commands = [
+            f"ss -ltnp 2>/dev/null | grep '{remote_server_name}' || true",
+            f"netstat -ltnp 2>/dev/null | grep '{remote_server_name}' || true",
+        ]
+        patterns = [
+            re.compile(rf":(\d+)\s+.*pid={re.escape(pid)}\b"),
+            re.compile(
+                rf":(\d+)\s+.*\b{re.escape(pid)}/{re.escape(remote_server_name)}\b"
+            ),
+            re.compile(r":(\d+)"),
+        ]
+
+        ports: list[int] = []
+        seen: set[int] = set()
+        for cmd in commands:
+            output = self.run_root_cmd(cmd)
+            for line in output.splitlines():
+                if remote_server_name not in line and pid not in line:
+                    continue
+                for pattern in patterns:
+                    match = pattern.search(line)
+                    if not match:
+                        continue
+                    port = int(match.group(1))
+                    if port in seen:
+                        break
+                    seen.add(port)
+                    ports.append(port)
+                    break
+        return ports
+
     def cleanup_remote_frida_files(self) -> None:
         remote_dir = self.context.remote_frida_dir
-        if remote_dir != "/data/local/tmp/fr":
+        if remote_dir != "/data/local/tmp":
             raise RuntimeError(f"拒绝清理非预期目录: {remote_dir}")
         if self.context.adb_device is None:
             return
@@ -265,11 +429,50 @@ class DeviceService:
         if stopped_any:
             time.sleep(0.5)
 
-        self.context.emit(f"清理远端 Frida 目录: {remote_dir}")
-        files = " ".join(
-            f"{remote_dir}/{name}" for name in self.get_all_remote_frida_server_names()
-        )
+        self.context.emit(f"清理远端 Frida 文件: {remote_dir}/{self.get_remote_frida_server_name()}")
+        files = " ".join(f"{remote_dir}/{name}" for name in self.get_all_remote_frida_server_names())
         self.run_root_cmd(f"rm -f {files} 2>/dev/null || true")
+
+    def stop_remote_frida_processes(self) -> bool:
+        if self.context.adb_device is None:
+            return False
+        if not self.is_root():
+            raise RuntimeError("设备没有被 root，无法停止 Frida Server 进程。")
+
+        stopped_any = False
+        for remote_server_name in self.get_all_remote_frida_server_names():
+            pid = self.get_remote_server_pid(remote_server_name)
+            if pid is None:
+                continue
+            self.context.emit(
+                f"检测到远端 {remote_server_name} 进程正在运行 (pid={pid})，准备停止"
+            )
+            self.run_root_cmd(f"kill -9 {pid}")
+            stopped_any = True
+        if stopped_any:
+            time.sleep(0.5)
+        return stopped_any
+
+    def stop_frida_server(self) -> None:
+        if self.context.adb_device is None:
+            raise RuntimeError("请先准备环境或连接设备后，再停止 Frida Server。")
+        if not self.is_root():
+            raise RuntimeError("设备没有被 root，无法停止 Frida Server。")
+
+        remote_file = self.get_remote_frida_server_path()
+        remote_server_name = self.get_remote_frida_server_name()
+        pid = self.get_remote_server_pid(remote_server_name)
+        file_exists = self.remote_file_exists(remote_file)
+
+        self.context.emit(f"[*] 准备停止 Frida Server: {remote_file}")
+
+        self.cleanup_remote_frida_files()
+        self.context.frida_device = None
+
+        if pid is None and not file_exists:
+            self.context.emit("[*] 当前未发现运行中的 Frida Server，也没有残留部署文件。")
+        else:
+            self.context.emit(f"[+] Frida Server 已停止并清理: {remote_file}")
 
     def remote_file_exists(self, path: str) -> bool:
         result = self.adb_shell(f"test -f {path} && echo exists || echo missing")
@@ -278,6 +481,16 @@ class DeviceService:
     def remote_dir_exists(self, path: str) -> bool:
         result = self.adb_shell(f"[ -d {path} ] && echo exists || echo missing")
         return result == "exists"
+
+    def read_remote_start_log(self, max_lines: int = 80) -> str:
+        if self.context.adb_device is None:
+            return ""
+        try:
+            return self.run_root_cmd(
+                f"tail -n {max_lines} /sdcard/f_server.log 2>/dev/null || true"
+            ).strip()
+        except Exception:
+            return ""
 
     def push_file_to_remote(self, local_path, remote_path: str) -> None:
         try:
@@ -322,23 +535,36 @@ class DeviceService:
         remote_file = self.get_remote_frida_server_path()
         self.context.emit(
             "当前选择的 Frida Server: "
-            f"{self.get_frida_server_variant_label()} ({frida_server_file}) -> {remote_file}"
+            f"{self.get_frida_server_label()} ({frida_server_file}) -> {remote_file}"
         )
 
         local_frida_server = self.context.mobile_deploy_dir / frida_server_file
         if not local_frida_server.exists():
-            server_kind = "florida-server" if self.context.frida_server_variant == "florida" else "frida-server"
-            raise FileNotFoundError(f"缺少本地 {server_kind} 文件: {local_frida_server}")
+            raise FileNotFoundError(f"缺少本地 rusda-server 文件: {local_frida_server}")
+
+        remote_server_name = self.get_remote_frida_server_name()
+        existing_pid = self.get_remote_server_pid(remote_server_name)
+        remote_file_exists = self.remote_file_exists(remote_file)
+
+        if existing_pid is not None and remote_file_exists and self.is_frida_environment_ready():
+            self.context.emit(
+                f"[*] 检测到 rusda 服务已在运行 (pid={existing_pid})，且远端文件已存在，跳过删除和重启。"
+            )
+            return
 
         if not self.remote_dir_exists(self.context.remote_frida_dir):
             self.run_root_cmd(f"mkdir -p {self.context.remote_frida_dir}")
-        self.cleanup_remote_frida_files()
 
-        remote_server_name = self.get_remote_frida_server_name()
-        temp_remote = f"/sdcard/{remote_server_name}"
-        self.push_file_to_remote(local_frida_server, temp_remote)
-        self.run_root_cmd(f"mv {temp_remote} {remote_file}")
-        self.run_root_cmd(f"chmod 755 {remote_file}")
+        self.stop_remote_frida_processes()
+
+        if remote_file_exists:
+            self.context.emit(f"[*] 检测到远端 rusda 文件已存在，跳过删除和重新上传：{remote_file}")
+            self.run_root_cmd(f"chmod 755 {remote_file}")
+        else:
+            temp_remote = f"/sdcard/{remote_server_name}"
+            self.push_file_to_remote(local_frida_server, temp_remote)
+            self.run_root_cmd(f"mv {temp_remote} {remote_file}")
+            self.run_root_cmd(f"chmod 755 {remote_file}")
 
         self.run_root_cmd(
             f"cd {self.context.remote_frida_dir} && ./{remote_server_name} > /sdcard/f_server.log 2>&1 &",
@@ -352,9 +578,37 @@ class DeviceService:
                 )
                 return
             time.sleep(0.5)
-        raise RuntimeError(
-            f"Frida Server 启动失败: {remote_file}。请检查权限或手动启动。"
-        )
+
+        pid = self.get_remote_server_pid(remote_server_name)
+        ports = self.get_remote_server_ports(remote_server_name)
+        start_log = self.read_remote_start_log()
+        if pid is not None:
+            self.context.emit(
+                f"[!] 检测到 {remote_server_name} 进程仍在运行 (pid={pid})，"
+                "但 Frida 探活没有通过。"
+            )
+        if ports:
+            self.context.emit(
+                f"[!] {remote_server_name} 当前监听端口: {', '.join(str(port) for port in ports)}"
+            )
+        if start_log:
+            self.context.emit("[!] 远端 Frida Server 启动日志：")
+            for line in start_log.splitlines():
+                self.context.emit(f"[!] {line}")
+
+        detail_parts = [f"Frida Server 启动失败: {remote_file}"]
+        if pid is not None:
+            detail_parts.append(f"pid={pid}")
+        if ports:
+            detail_parts.append(f"ports={','.join(str(port) for port in ports)}")
+        if start_log:
+            summary = start_log.splitlines()[-1].strip()
+            if summary:
+                detail_parts.append(f"log={summary}")
+        if pid is not None and not ports:
+            detail_parts.append("进程已启动但未发现监听端口")
+        detail_parts.append("请检查权限、监听端口或手动启动。")
+        raise RuntimeError(" | ".join(detail_parts))
 
     def refresh_applications(self) -> list[AppRecord]:
         self.context.frida_device = self._get_frida_device()
@@ -412,95 +666,29 @@ class DeviceService:
         )
         return package_name in combined, combined
 
+    def get_foreground_package(self) -> Optional[str]:
+        outputs = [
+            self.adb_shell("dumpsys activity activities | grep mResumedActivity"),
+            self.adb_shell("dumpsys activity activities | grep topResumedActivity"),
+            self.adb_shell("dumpsys window windows | grep mCurrentFocus"),
+            self.adb_shell("dumpsys window windows | grep mFocusedApp"),
+        ]
+        package_patterns = [
+            r"\s([A-Za-z0-9_.$]+?)/",
+            r"u\d+\s+([A-Za-z0-9_.$]+)/",
+        ]
+        for output in outputs:
+            if not output:
+                continue
+            for line in output.splitlines():
+                for pattern in package_patterns:
+                    match = re.search(pattern, line)
+                    if match:
+                        package_name = match.group(1)
+                        if package_name and "." in package_name:
+                            return package_name
+        return None
+
     def _is_app_in_foreground(self, package_name: str) -> bool:
         is_foreground, _ = self._get_foreground_state(package_name)
         return is_foreground
-
-    def _wait_for_foreground_and_refresh_pid(
-        self,
-        package_name: str,
-        fallback_name: Optional[str] = None,
-    ) -> tuple[Optional[int], Optional[str]]:
-        for _ in range(100):
-            time.sleep(0.2)
-            if self._is_app_in_foreground(package_name):
-                break
-        pid, name = self._find_running_process(package_name, refresh_apps=True)
-        return pid, name or fallback_name
-
-    def _require_running_foreground_app(
-        self,
-        package_name: str,
-        pid: Optional[int],
-        *,
-        reason: str,
-    ) -> int:
-        is_foreground, foreground_output = self._get_foreground_state(package_name)
-        if pid is None or not is_foreground:
-            diagnostic = foreground_output or "<no foreground signals matched>"
-            raise RuntimeError(
-                f"{reason}，但未确认 {package_name} 已稳定进入前台并暴露可用 PID。"
-                f" foreground={is_foreground}, pid={pid}"
-                f" diagnostic={diagnostic}"
-            )
-        return pid
-
-    def ensure_app_in_foreground(self, package_name: str) -> AppContext:
-        uid, install_path, install_apk_filename, _, version_name = self._read_app_metadata(
-            package_name
-        )
-
-        proc_map: dict[str, tuple[int, str]] = {}
-        for app in sorted(self.refresh_applications(), key=lambda item: item.pid or 0):
-            if app.pid:
-                proc_map[app.identifier] = (app.pid, app.name)
-
-        is_running = package_name in proc_map
-        is_foreground, _ = self._get_foreground_state(package_name)
-
-        if is_running:
-            if is_foreground:
-                self.context.emit(f"App {package_name} 已在前台运行。")
-                pid, name = proc_map[package_name]
-                pid = self._require_running_foreground_app(
-                    package_name,
-                    pid,
-                    reason="检测到目标 App 已在前台运行",
-                )
-            else:
-                self.context.emit(f"App {package_name} 在后台运行，正在拉到前台...")
-                self.adb_shell(
-                    f"monkey -p {package_name} -c android.intent.category.LAUNCHER 1"
-                )
-                old_pid, old_name = proc_map[package_name]
-                pid, name = self._wait_for_foreground_and_refresh_pid(
-                    package_name,
-                    fallback_name=old_name,
-                )
-                if pid is not None and pid != old_pid:
-                    self.context.emit(
-                        f"App {package_name} 前台切换后 PID 已更新：{old_pid} -> {pid}"
-                    )
-                pid = self._require_running_foreground_app(
-                    package_name,
-                    pid,
-                    reason="已尝试将后台 App 拉到前台",
-                )
-        else:
-            self.context.emit(f"App {package_name} 没有运行，正在启动...")
-            pid, name = self.start_app(package_name)
-            pid = self._require_running_foreground_app(
-                package_name,
-                pid,
-                reason="已尝试启动目标 App",
-            )
-
-        return self._build_app_context(
-            package_name,
-            pid=pid,
-            name=name,
-            uid=uid,
-            version_name=version_name,
-            install_path=install_path,
-            install_apk_filename=install_apk_filename,
-        )

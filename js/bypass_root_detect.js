@@ -12,6 +12,26 @@
 // 改写 build.prop 读取结果，并补 native 层的 libc 调用拦截。
 
 Java.perform(function() {
+    function findExportCompat(moduleName, exportName) {
+        if (typeof Module === "undefined") {
+            return null;
+        }
+        if (typeof Module.findGlobalExportByName === "function") {
+            try {
+                var globalAddr = Module.findGlobalExportByName(exportName);
+                if (globalAddr) {
+                    return globalAddr;
+                }
+            } catch (e) {}
+        }
+        if (typeof Module.findExportByName === "function") {
+            try {
+                return Module.findExportByName(moduleName, exportName);
+            } catch (e) {}
+        }
+        return null;
+    }
+
     // 常见 root 管理器、隐藏工具、Xposed/Substrate/Magisk 等包名黑名单。
     var RootPackages = ["com.noshufou.android.su", "com.noshufou.android.su.elite", "eu.chainfire.supersu",
         "com.koushikdutta.superuser", "com.thirdparty.superuser", "com.yellowes.su", "com.koushikdutta.rommanager",
@@ -235,40 +255,50 @@ Java.perform(function() {
     };
 
     // native 层如果直接 fopen(".../su")，把路径改成不存在的文件。
-    Interceptor.attach(Module.findExportByName("libc.so", "fopen"), {
-        onEnter: function(args) {
-            var path = Memory.readCString(args[0]);
-            path = path.split("/");
-            var executable = path[path.length - 1];
-            var shouldFakeReturn = (RootBinaries.indexOf(executable) > -1)
-            if (shouldFakeReturn) {
-                Memory.writeUtf8String(args[0], "/notexists");
-                send("Bypass native fopen");
-            }
-        },
-        onLeave: function(retval) {
+    var fopenAddr = findExportCompat("libc.so", "fopen");
+    if (fopenAddr) {
+        Interceptor.attach(fopenAddr, {
+            onEnter: function(args) {
+                var path = Memory.readCString(args[0]);
+                path = path.split("/");
+                var executable = path[path.length - 1];
+                var shouldFakeReturn = (RootBinaries.indexOf(executable) > -1)
+                if (shouldFakeReturn) {
+                    Memory.writeUtf8String(args[0], "/notexists");
+                    send("Bypass native fopen");
+                }
+            },
+            onLeave: function(retval) {
 
-        }
-    });
+            }
+        });
+    } else {
+        send("libc fopen export not found, skip native fopen hook");
+    }
 
     // native 层如果直接 system("getprop"/"id"/"su")，替换成无害命令。
-    Interceptor.attach(Module.findExportByName("libc.so", "system"), {
-        onEnter: function(args) {
-            var cmd = Memory.readCString(args[0]);
-            send("SYSTEM CMD: " + cmd);
-            if (cmd.indexOf("getprop") != -1 || cmd == "mount" || cmd.indexOf("build.prop") != -1 || cmd == "id") {
-                send("Bypass native system: " + cmd);
-                Memory.writeUtf8String(args[0], "grep");
-            }
-            if (cmd == "su") {
-                send("Bypass native system: " + cmd);
-                Memory.writeUtf8String(args[0], "justafakecommandthatcannotexistsusingthisshouldthowanexceptionwheneversuiscalled");
-            }
-        },
-        onLeave: function(retval) {
+    var systemAddr = findExportCompat("libc.so", "system");
+    if (systemAddr) {
+        Interceptor.attach(systemAddr, {
+            onEnter: function(args) {
+                var cmd = Memory.readCString(args[0]);
+                send("SYSTEM CMD: " + cmd);
+                if (cmd.indexOf("getprop") != -1 || cmd == "mount" || cmd.indexOf("build.prop") != -1 || cmd == "id") {
+                    send("Bypass native system: " + cmd);
+                    Memory.writeUtf8String(args[0], "grep");
+                }
+                if (cmd == "su") {
+                    send("Bypass native system: " + cmd);
+                    Memory.writeUtf8String(args[0], "justafakecommandthatcannotexistsusingthisshouldthowanexceptionwheneversuiscalled");
+                }
+            },
+            onLeave: function(retval) {
 
-        }
-    });
+            }
+        });
+    } else {
+        send("libc system export not found, skip native system hook");
+    }
 
     /*
 

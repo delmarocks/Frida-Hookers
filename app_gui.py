@@ -4,6 +4,7 @@ from pathlib import Path
 
 from PySide6.QtWidgets import QApplication
 
+from core.apk_scan_service import ApkScanService
 from core.device_service import DeviceService
 from core.models import HookerContext
 from core.rpc_service import RpcService
@@ -20,6 +21,7 @@ def build_main_window(project_root: Path) -> MainWindow:
     workspace_service = WorkspaceService(context)
     session_service = SessionService(context, device_service, workspace_service)
     rpc_service = RpcService(context, session_service, workspace_service)
+    apk_scan_service = ApkScanService(context)
     rpc_service.enable_persistent_session()
 
     deps = MainWindowDependencies(
@@ -27,6 +29,7 @@ def build_main_window(project_root: Path) -> MainWindow:
         session_service=session_service,
         workspace_service=workspace_service,
         rpc_service=rpc_service,
+        apk_scan_service=apk_scan_service,
         context=context,
     )
     return MainWindow(deps)

@@ -28,7 +28,7 @@ class WorkspaceWorker(QObject):
     def run(self) -> None:
         try:
             self.workspace_service.context.emit(
-                f"[*] 已选中目标 App，开始初始化工作目录并检查 APK：{self.package_name}"
+                f"[*] 已选中目标 App，开始初始化工作目录并刷新脚本列表：{self.package_name}"
             )
             app = self.device_service.prepare_app_context(self.package_name)
             workspace_dir = self.workspace_service.ensure_workspace(app)

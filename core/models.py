@@ -3,11 +3,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Literal, Optional
+from typing import Any, Callable, Optional
 
 
 LogHandler = Callable[[str], None]
-FridaServerVariant = Literal["default", "florida"]
+SessionEventHandler = Callable[[str, dict[str, Any]], None]
 
 
 @dataclass
@@ -37,6 +37,9 @@ class HookSession:
     script: Any
     script_path: Optional[Path] = None
     mode: str = "attach"
+    use_v8: bool = False
+    auto_follow_attempted: bool = False
+    auto_follow_count: int = 0
 
 
 @dataclass
@@ -48,14 +51,10 @@ class HookerContext:
     mobile_deploy_dir: Path
     js_dir: Path
     workspaces_dir: Path
-    remote_frida_dir: str = "/data/local/tmp/fr"
-    remote_default_frida_server_name: str = "fri-ser"
-    remote_florida_server_name: str = "flo-ser"
+    remote_frida_dir: str = "/data/local/tmp"
+    remote_frida_server_name: str = "rusda-16.2.1"
     remote_radar_dex: str = "/data/local/tmp/radar.dex"
-    frida_server_variant: FridaServerVariant = "default"
-    frida_server_arm64: str = "frida-server-16.7.19-android-arm64"
-    frida_server_arm: str = "frida-server-16.7.19-android-arm"
-    florida_server_arm64: str = "florida-server-16.7.19"
+    frida_server_arm64: str = "rusda-server-16.2.1-android-arm64"
     adb_device: Any = None
     frida_device: Any = None
     apps: list[AppRecord] = field(default_factory=list)
@@ -64,6 +63,7 @@ class HookerContext:
     active_session: Optional[HookSession] = None
     webserver_url: Optional[str] = None
     log_handler: Optional[LogHandler] = None
+    session_event_handler: Optional[SessionEventHandler] = None
 
     def emit(self, message: str) -> None:
         # 统一日志出口，未来 GUI 可以在这里接管日志显示。
@@ -72,10 +72,20 @@ class HookerContext:
         else:
             print(message)
 
+    def emit_session_event(self, event_type: str, payload: dict[str, Any]) -> None:
+        # 统一的会话事件出口，用于 detached 等运行态变化通知 GUI。
+        if self.session_event_handler is not None:
+            self.session_event_handler(event_type, payload)
+
     @property
     def local_radar_dex(self) -> Path:
         # 返回项目内置 radar.dex 的本地路径。
         return self.mobile_deploy_dir / "radar.dex"
+
+    @property
+    def local_apk_check_pack_exe(self) -> Path:
+        # 返回项目内置 ApkCheckPack.exe 的本地路径。
+        return self.mobile_deploy_dir / "ApkCheckPack.exe"
 
     @classmethod
     def from_project_root(
