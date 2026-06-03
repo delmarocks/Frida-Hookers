@@ -112,6 +112,28 @@ def test_on_package_changed_switches_default_script_root_to_workspace_script_dir
     assert logs[-1] == ui_messages.WORKSPACE_NOT_INITIALIZED_LOG
 
 
+def test_on_package_changed_does_not_sync_builtin_scripts_before_workspace_prepare(
+    owner_widget,
+    dummy_deps,
+    tmp_path,
+) -> None:
+    controller, widgets, _, _, _, _, applied_roots = build_controller(owner_widget, dummy_deps)
+    package_name = "pkg.demo"
+    workspace_dir = tmp_path / "workspaces" / package_name
+    script_dir = workspace_dir / "js"
+
+    dummy_deps.workspace_service.workspace_dir = lambda package: workspace_dir
+    dummy_deps.workspace_service.script_dir = lambda package: script_dir
+
+    widgets.app_combo.addItem("Demo", package_name)
+    widgets.app_combo.setCurrentIndex(0)
+
+    controller.on_package_changed()
+
+    assert applied_roots[-1] == script_dir
+    assert script_dir.exists() is False
+
+
 def test_prepare_selected_workspace_requires_selected_app(owner_widget, dummy_deps) -> None:
     controller, widgets, _, _, _, errors, _ = build_controller(owner_widget, dummy_deps)
     widgets.app_combo.setCurrentIndex(-1)

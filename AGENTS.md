@@ -12,8 +12,7 @@
   - `ui/`：GUI 组装、控制器、错误展示、日志面板、线程切回与后台 worker
   - `tests/`：本地轻量回归测试
   - `workspaces/`：按包名隔离的运行时工作区，不是框架源码
-  - `hookers/js/`：GUI 当前实际使用的内置 Frida 脚本、RPC 资产、参数化脚本模板、清理 warp
-  - `js/`：历史脚本目录、模板脚本、实验脚本与待迁移资源
+  - `hookers/js/`：GUI 当前实际使用的内置 Frida 脚本、RPC 资产、参数化脚本模板、清理 warp；也包含 `bypass_frida_svc_detect.js`、`replace_dlsym_get_pthread_create.js` 这类无单独快捷按钮的专项内置脚本
   - `mobile-deploy/`：设备侧二进制与本地辅助工具
 
 ## 文档编码约定
@@ -167,7 +166,7 @@
 - GUI 启动时默认脚本根目录是 `hookers/js`；选中 App 后会切到 `workspaces/<package>/js`
 - GUI 快捷按钮默认从 `hookers/js` 读取内置脚本；但参数化脚本会先在 `workspaces/<package>/js` 生成运行时副本再启动
 - 左侧脚本列表在未选 App 时指向 `hookers/js`；选中 App 后默认指向 `workspaces/<package>/js`，但用户仍可手动切换脚本根目录
-- `workspaces/<package>/js` 不再保存 GUI 内置脚本副本；初始化工作目录时会清理旧副本
+- `workspaces/<package>/js` 中已有脚本在重复初始化工作目录时会被保留；当前初始化流程不会主动清理或删除原有脚本，只会补齐辅助资源、刷新本地 APK，并把 `hookers/js` 里的内置脚本复制到工作区，文件名前缀为 `内置-`
 - `准备环境并刷新 App` 后，GUI 会尝试识别当前前台 App；如果该包名存在于刷新后的应用列表里，则自动选中
 - 如果没有可识别的前台 App，则保持 App 选择为空
 - 当前固定使用单一设备侧 server：
@@ -392,7 +391,7 @@
 ## 测试基线
 
 - 当前本地测试基线：`python -m pytest tests -q`
-- 当前通过数量：**209 passed**
+- 当前通过数量：**215 passed**
 - 已覆盖的重点包括：
   - `ui_messages`
   - `log_panel`
@@ -423,10 +422,10 @@
 - 不要把 `workspaces/<package>/` 当成框架源码
 - 不要把 `mobile-deploy/` 二进制当成业务实现说明
 - 不要默认 README 一定和当前代码同步；当前代码才是事实来源
-- 不要默认 `js/` 里的脚本就是 GUI 当前实际用到的脚本；优先确认 `hookers/js/`
+- 不要默认“无快捷按钮脚本”就不属于内置集合；优先确认 `hookers/js/`
 - 不要假设 Attach 会自动把 App 拉到前台
 - 不要假设选中 App 会自动初始化工作区
-- 不要假设初始化工作目录会再复制一份 GUI 内置脚本到工作区
+- 当前初始化工作目录会把 `hookers/js` 的内置脚本复制到工作区，文件名加 `内置-` 前缀；已有同名副本会跳过，不会覆盖
 - 不要假设 APK 扫描依赖当前 App 或当前会话
 - 不要因为 `device_service.py` 涉及 ADB/Frida 就认为它不可测试；其中已有不少纯解析/纯本地测试
 - 不要把 `composition.py` 当作业务层；它只做装配与接线

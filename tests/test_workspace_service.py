@@ -98,6 +98,63 @@ def test_materialize_multi_script_bundle_concatenates_scripts_in_order(workspace
     assert content.index("console.log('A');") < content.index("console.log('B');")
 
 
+def test_sync_builtin_scripts_to_workspace_copies_with_builtin_prefix(workspace_context) -> None:
+    service = WorkspaceService(workspace_context)
+    package_name = "com.example.demo"
+    script_dir = service.script_dir(package_name)
+    builtin = workspace_context.hookers_js_dir / "detect_network_stack.js"
+    builtin.parent.mkdir(parents=True, exist_ok=True)
+    builtin.write_text("// builtin", encoding="utf-8")
+
+    synced = service.sync_builtin_scripts_to_workspace(package_name, script_dir)
+
+    target = script_dir / "内置-detect_network_stack.js"
+    assert target.exists()
+    assert target.read_text(encoding="utf-8") == "// builtin"
+    assert target in synced
+
+
+def test_sync_builtin_scripts_to_workspace_copies_new_builtin_frida_scripts(workspace_context) -> None:
+    service = WorkspaceService(workspace_context)
+    package_name = "com.example.demo"
+    script_dir = service.script_dir(package_name)
+
+    svc_detect = workspace_context.hookers_js_dir / "bypass_frida_svc_detect.js"
+    svc_detect.parent.mkdir(parents=True, exist_ok=True)
+    svc_detect.write_text("// svc detect", encoding="utf-8")
+
+    replace_dlsym = workspace_context.hookers_js_dir / "replace_dlsym_get_pthread_create.js"
+    replace_dlsym.write_text("// replace dlsym", encoding="utf-8")
+
+    synced = service.sync_builtin_scripts_to_workspace(package_name, script_dir)
+
+    svc_target = script_dir / "内置-bypass_frida_svc_detect.js"
+    replace_target = script_dir / "内置-replace_dlsym_get_pthread_create.js"
+    assert svc_target.exists()
+    assert svc_target.read_text(encoding="utf-8") == "// svc detect"
+    assert replace_target.exists()
+    assert replace_target.read_text(encoding="utf-8") == "// replace dlsym"
+    assert svc_target in synced
+    assert replace_target in synced
+
+
+def test_sync_builtin_scripts_to_workspace_skips_existing_prefixed_file(workspace_context) -> None:
+    service = WorkspaceService(workspace_context)
+    package_name = "com.example.demo"
+    script_dir = service.script_dir(package_name)
+    script_dir.mkdir(parents=True, exist_ok=True)
+    target = script_dir / "内置-detect_network_stack.js"
+    target.write_text("// keep me", encoding="utf-8")
+    builtin = workspace_context.hookers_js_dir / "detect_network_stack.js"
+    builtin.parent.mkdir(parents=True, exist_ok=True)
+    builtin.write_text("// builtin", encoding="utf-8")
+
+    synced = service.sync_builtin_scripts_to_workspace(package_name, script_dir)
+
+    assert target.read_text(encoding="utf-8") == "// keep me"
+    assert target not in synced
+
+
 def test_ensure_local_apk_uses_existing_file_without_pull(workspace_context, sample_app_context, monkeypatch) -> None:
     service = WorkspaceService(workspace_context)
     existing = service.workspace_apk_path(sample_app_context)
@@ -160,7 +217,7 @@ def test_save_decrypt_output_raises_structured_error_on_write_failure(workspace_
 def test_create_initial_workspace_records_summary_state(workspace_context, sample_app_context, monkeypatch) -> None:
     service = WorkspaceService(workspace_context)
     monkeypatch.setattr(service, "ensure_workspace_helpers", lambda app, package_dir: None)
-    monkeypatch.setattr(service, "remove_workspace_builtin_scripts", lambda script_dir: None)
+    monkeypatch.setattr(service, "sync_builtin_scripts_to_workspace", lambda package_name, script_dir: [])
     monkeypatch.setattr(service, "ensure_local_apk", lambda app, refresh=False: setattr(workspace_context, "last_workspace_apk_status", "pulled") or service.workspace_apk_path(app))
 
     package_dir = service.create_initial_workspace(sample_app_context)
@@ -176,7 +233,7 @@ def test_initialize_existing_workspace_records_summary_state(workspace_context, 
     package_dir = service.workspace_dir(sample_app_context.identifier)
     package_dir.mkdir(parents=True, exist_ok=True)
     monkeypatch.setattr(service, "ensure_workspace_helpers", lambda app, package_dir: None)
-    monkeypatch.setattr(service, "remove_workspace_builtin_scripts", lambda script_dir: None)
+    monkeypatch.setattr(service, "sync_builtin_scripts_to_workspace", lambda package_name, script_dir: [])
     monkeypatch.setattr(service, "ensure_local_apk", lambda app, refresh=False: setattr(workspace_context, "last_workspace_apk_status", "reused") or service.workspace_apk_path(app))
 
     result = service.initialize_existing_workspace(sample_app_context)
@@ -184,6 +241,29 @@ def test_initialize_existing_workspace_records_summary_state(workspace_context, 
     assert result == package_dir
     assert workspace_context.last_workspace_prepare_mode == "updated"
     assert workspace_context.last_workspace_apk_status == "reused"
+
+
+def test_initialize_existing_workspace_preserves_existing_workspace_scripts(
+    workspace_context,
+    sample_app_context,
+    monkeypatch,
+) -> None:
+    service = WorkspaceService(workspace_context)
+    package_dir = service.workspace_dir(sample_app_context.identifier)
+    script_dir = service.script_dir(sample_app_context.identifier)
+    script_dir.mkdir(parents=True, exist_ok=True)
+    existing_builtin_named_script = script_dir / "detect_network_stack.js"
+    existing_builtin_named_script.write_text("// keep me", encoding="utf-8")
+    custom_script = script_dir / "custom.js"
+    custom_script.write_text("// custom", encoding="utf-8")
+
+    monkeypatch.setattr(service, "ensure_local_apk", lambda app, refresh=False: service.workspace_apk_path(app))
+
+    result = service.initialize_existing_workspace(sample_app_context)
+
+    assert result == package_dir
+    assert existing_builtin_named_script.read_text(encoding="utf-8") == "// keep me"
+    assert custom_script.read_text(encoding="utf-8") == "// custom"
 
 def test_ensure_workspace_wraps_initialization_error(workspace_context, sample_app_context, monkeypatch) -> None:
     service = WorkspaceService(workspace_context)

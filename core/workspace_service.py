@@ -5,7 +5,6 @@ from typing import Optional
 
 from .errors import (
     WorkspaceApkPullError,
-    WorkspaceFileReadError,
     WorkspaceFileWriteError,
     WorkspaceInitializationError,
     WorkspaceResourceMissingError,
@@ -17,6 +16,7 @@ from .models import AppContext, HookerContext
 BUILTIN_JS_FILES = [
     "android_ui.js",
     "apk_shell_scanner.js",
+    "bypass_frida_svc_detect.js",
     "bypass_root_detect.js",
     "bypass_vpn_detect.js",
     "click.js",
@@ -34,6 +34,7 @@ BUILTIN_JS_FILES = [
     "keystore_dump.js",
     "okhttp.js",
     "print_okhttp_interceptors.js",
+    "replace_dlsym_get_pthread_create.js",
     "text_view.js",
     "url.js",
     "activity_events.js",
@@ -47,6 +48,7 @@ GUI_RESOURCE_JS_FILES = BUILTIN_JS_FILES + [
 ]
 
 DEFAULT_PACKAGE_PLACEHOLDER = "com.smile.gifmaker"
+WORKSPACE_BUILTIN_PREFIX = "内置-"
 
 
 class WorkspaceService:
@@ -119,66 +121,23 @@ class WorkspaceService:
         text = src.read_text(encoding="utf-8", errors="ignore")
         return text.replace(DEFAULT_PACKAGE_PLACEHOLDER, package_name)
 
-    def remove_workspace_builtin_scripts(self, script_dir: Path) -> None:
-        # 工作区不再保存 GUI 内置脚本副本，避免工作区旧脚本覆盖 GUI 固定资源。
-        if not script_dir.exists():
-            return
+    def workspace_builtin_script_name(self, js_file: str) -> str:
+        return f"{WORKSPACE_BUILTIN_PREFIX}{js_file}"
 
-        for js_file in BUILTIN_JS_FILES:
-            target = script_dir / js_file
-            if not target.exists():
-                continue
-            try:
-                target.unlink()
-            except OSError as exc:
-                raise WorkspaceFileWriteError(
-                    f"删除工作区内置脚本失败: {target}",
-                    hint="请检查当前工作目录脚本文件是否可写，必要时关闭占用后重新初始化工作目录。",
-                ) from exc
-
-        try:
-            next(script_dir.iterdir())
-        except StopIteration:
-            try:
-                script_dir.rmdir()
-            except OSError:
-                pass
-
-    def materialize_builtin_scripts(
-        self,
-        package_name: str,
-        script_dir: Path,
-        rewrite_existing: bool = False,
-    ) -> None:
-        # 把内置脚本物化到工作区，并在需要时修正仍保留默认包名占位值的旧副本。
+    def sync_builtin_scripts_to_workspace(self, package_name: str, script_dir: Path) -> list[Path]:
+        # 仅在初始化工作目录时，把当前 GUI 实际使用的内置脚本复制到工作区，
+        # 文件名前统一加“内置-”前缀；已有同名文件则保留并跳过。
         script_dir.mkdir(parents=True, exist_ok=True)
+        synced_paths: list[Path] = []
         for js_file in BUILTIN_JS_FILES:
             rendered = self._render_builtin_script(js_file, package_name)
             if rendered is None:
                 continue
-
-            target = script_dir / js_file
-            if not target.exists():
-                self.create_working_file(target, rendered)
+            target = script_dir / self.workspace_builtin_script_name(js_file)
+            if target.exists():
                 continue
-
-            if not rewrite_existing:
-                continue
-
-            try:
-                existing = target.read_text(encoding="utf-8")
-            except OSError as exc:
-                raise WorkspaceFileReadError(
-                    f"读取工作区脚本副本失败: {target}",
-                    hint="请检查当前工作目录脚本副本是否仍然存在且可读，必要时重新初始化工作目录。",
-                ) from exc
-
-            if DEFAULT_PACKAGE_PLACEHOLDER not in existing:
-                continue
-
-            updated = existing.replace(DEFAULT_PACKAGE_PLACEHOLDER, package_name)
-            if updated != existing:
-                self.create_working_file(target, updated)
+            synced_paths.append(self.create_working_file(target, rendered))
+        return synced_paths
 
     def workspace_apk_path(self, app: AppContext) -> Path:
         safe_name = self._sanitize_filename_component(app.name, app.identifier)
@@ -237,7 +196,7 @@ class WorkspaceService:
             self.context.workspaces_dir.mkdir(parents=True, exist_ok=True)
             package_dir.mkdir(parents=True, exist_ok=True)
             self.ensure_workspace_helpers(app, package_dir)
-            self.remove_workspace_builtin_scripts(package_dir / "js")
+            self.sync_builtin_scripts_to_workspace(app.identifier, package_dir / "js")
             self.ensure_local_apk(app, refresh=True)
             self.context.last_workspace_prepare_mode = "created"
             return package_dir
@@ -250,13 +209,14 @@ class WorkspaceService:
             ) from exc
 
     def initialize_existing_workspace(self, app: AppContext) -> Path:
-        # 已有工作目录时补齐缺失脚本、修正旧占位值，并刷新本地 APK 副本。
+        # 已有工作目录时只补齐辅助资源并刷新本地 APK 副本，
+        # 不主动删除或覆盖工作区里已经存在的脚本文件。
         package_dir = self.workspace_dir(app.identifier)
         try:
             self.context.workspaces_dir.mkdir(parents=True, exist_ok=True)
             package_dir.mkdir(parents=True, exist_ok=True)
             self.ensure_workspace_helpers(app, package_dir)
-            self.remove_workspace_builtin_scripts(package_dir / "js")
+            self.sync_builtin_scripts_to_workspace(app.identifier, package_dir / "js")
             self.ensure_local_apk(app, refresh=False)
             self.context.last_workspace_prepare_mode = "updated"
             return package_dir

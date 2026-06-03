@@ -114,6 +114,20 @@ def test_main_window_builds_terminal_widgets(qapp, dummy_deps) -> None:
     window.deleteLater()
 
 
+def test_refresh_script_list_shows_prefixed_workspace_builtin_scripts(qapp, dummy_deps, tmp_path) -> None:
+    window = build_main_window(dummy_deps)
+    workspace_script_dir = tmp_path / "workspaces" / "pkg.demo" / "js"
+    workspace_script_dir.mkdir(parents=True, exist_ok=True)
+    prefixed_builtin = workspace_script_dir / "内置-detect_network_stack.js"
+    prefixed_builtin.write_text("// builtin", encoding="utf-8")
+
+    window.apply_script_root(workspace_script_dir)
+
+    labels = [window.script_combo.itemText(index) for index in range(window.script_combo.count())]
+    assert "内置-detect_network_stack.js" in labels
+    window.deleteLater()
+
+
 def test_terminal_history_uses_up_down_keys(qapp, dummy_deps) -> None:
     window = build_main_window(dummy_deps)
     dummy_deps.context.current_app = dummy_deps.device_service.ensure_result
