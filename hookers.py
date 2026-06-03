@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import ctypes
+import os
+import sys
 import traceback
 import warnings
 from pathlib import Path
@@ -20,6 +23,33 @@ warnings.filterwarnings("ignore", category=SyntaxWarning)
 ANSI_GREEN = "\033[32m"
 ANSI_RED = "\033[31m"
 ANSI_RESET = "\033[0m"
+
+
+def _configure_windows_console_utf8() -> None:
+    # Windows PowerShell / cmd 默认代码页不稳定，容易把 UTF-8 中文显示成乱码。
+    # CLI 入口主动把 console code page 和 Python stdio 都切到 UTF-8，
+    # 这样 print / traceback / prompt 输出尽量保持一致。
+    if sys.platform != "win32":
+        return
+
+    os.environ.setdefault("PYTHONIOENCODING", "utf-8")
+    os.environ.setdefault("PYTHONUTF8", "1")
+
+    try:
+        kernel32 = ctypes.windll.kernel32
+        kernel32.SetConsoleOutputCP(65001)
+        kernel32.SetConsoleCP(65001)
+    except Exception:
+        pass
+
+    for stream_name in ("stdin", "stdout", "stderr"):
+        stream = getattr(sys, stream_name, None)
+        if stream is None or not hasattr(stream, "reconfigure"):
+            continue
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
 
 
 def pad_display(text, width: int) -> str:
@@ -401,6 +431,7 @@ class HookersCli:
 def main() -> int:
     # 命令行入口保持尽量薄。
     # 它只负责创建 CLI 对象并启动，不在这里堆业务逻辑。
+    _configure_windows_console_utf8()
     cli = HookersCli(Path(__file__).resolve().parent)
     cli.run()
     return 0

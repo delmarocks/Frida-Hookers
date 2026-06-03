@@ -1,0 +1,16 @@
+{
+  "compilerOptions": {
+    "target": "es2020",
+    "module": "es2020",
+    "moduleResolution": "node",
+    "allowJs": true,
+    "strict": false,
+    "skipLibCheck": true,
+    "types": [
+      "frida-gum"
+    ]
+  },
+  "include": [
+    ".generated/**/*.ts"
+  ]
+}

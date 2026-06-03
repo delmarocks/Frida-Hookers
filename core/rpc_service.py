@@ -66,7 +66,7 @@ class RpcService:
         self.session_service.require_current_app()
         pid = self.session_service.require_current_pid()
         online_session = self.session_service.frida_device.attach(pid)
-        rpc_path = self.context.js_dir / "rpc.js"
+        rpc_path = self.context.hookers_js_dir / "rpc.js"
         rpc_source = self.workspace_service.get_resource_script("rpc.js")
         resource_rpc = self.session_service._compose_script_code(
             rpc_path,

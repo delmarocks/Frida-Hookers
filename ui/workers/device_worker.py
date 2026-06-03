@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from PySide6.QtCore import QObject, Signal, Slot
+from core.errors import to_ui_error_payload
 
 
 class DeviceWorker(QObject):
@@ -14,7 +15,7 @@ class DeviceWorker(QObject):
     # 3. 枚举应用列表也可能比较慢
     # 如果直接在主线程执行，GUI 会卡住，窗口会表现成“未响应”。
     apps_ready = Signal(list, object)
-    failed = Signal(str)
+    failed = Signal(object)
     finished = Signal()
 
     def __init__(self, device_service: Any) -> None:
@@ -33,6 +34,10 @@ class DeviceWorker(QObject):
         #
         # 最后把结果转成适合 GUI 展示的简单字典列表，通过信号回传给主线程。
         try:
+            context = getattr(self.device_service, "context", None)
+            if context is not None:
+                context.last_connected_device_serial = None
+                context.last_prepare_frida_server_status = None
             self.device_service.connect()
             self.device_service.start_frida_server()
             self.device_service.deploy_radar_dex()
@@ -48,7 +53,7 @@ class DeviceWorker(QObject):
             foreground_package = self.device_service.get_foreground_package()
             self.apps_ready.emit(payload, foreground_package)
         except Exception as exc:
-            self.failed.emit(str(exc))
+            self.failed.emit(to_ui_error_payload(exc))
         finally:
             # 无论成功失败，都要通知线程可以收尾。
             self.finished.emit()

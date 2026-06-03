@@ -1,0 +1,11 @@
+{
+  "name": "frida-hookers-agent",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "frida-java-bridge": "*"
+  },
+  "devDependencies": {
+    "@types/frida-gum": "*"
+  }
+}

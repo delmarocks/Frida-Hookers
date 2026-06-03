@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Any
 
 from PySide6.QtCore import QObject, Signal, Slot
+from core.errors import HookStartError, HookersError, to_ui_error_payload
 
 
 class HookWorker(QObject):
@@ -15,7 +16,7 @@ class HookWorker(QObject):
     # 3. 发起 attach 或 spawn
     # 真正的 Frida 会话仍然由 SessionService 持有，worker 只是触发启动动作。
     started = Signal(str, str, str)
-    failed = Signal(str)
+    failed = Signal(object)
     finished = Signal()
 
     def __init__(
@@ -67,6 +68,10 @@ class HookWorker(QObject):
                 self.session_service.stop_active_session()
             except Exception:
                 pass
-            self.failed.emit(str(exc))
+            wrapped = exc if isinstance(exc, HookersError) else HookStartError(
+                str(exc),
+                hint="请确认目标 App 状态、脚本内容以及当前 attach/spawn 模式后重试。",
+            )
+            self.failed.emit(to_ui_error_payload(wrapped))
         finally:
             self.finished.emit()

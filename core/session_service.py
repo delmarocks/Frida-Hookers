@@ -1,8 +1,20 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from .device_service import DeviceService
+from .errors import (
+    AttachStageError,
+    CurrentAppMissingError,
+    CurrentPidMissingError,
+    FridaDeviceNotReadyError,
+    RestartAppError,
+    ResumeStageError,
+    ScriptFileMissingError,
+    ScriptLoadStageError,
+    SpawnStageError,
+)
 from .models import HookSession, HookerContext
 from .workspace_service import WorkspaceService
 
@@ -53,6 +65,112 @@ CONSOLE_BRIDGE_JS = r"""
 })();
 """
 
+HOOKERS_SCRIPT_BRIDGE_JS = r"""
+(function (global) {
+    function sendPayload(payload) {
+        try {
+            send(payload);
+        } catch (_) {
+        }
+    }
+
+    function buildStack() {
+        try {
+            var androidLogClz = Java.use("android.util.Log");
+            var exceptionClz = Java.use("java.lang.Exception");
+            return androidLogClz.getStackTraceString(exceptionClz.$new()).substring(20);
+        } catch (_) {
+            return "";
+        }
+    }
+
+    function emitLog(level, category, message, details) {
+        sendPayload({
+            type: "hookers_log",
+            level: level || "log",
+            category: category || "general",
+            message: message == null ? "" : String(message),
+            details: details === undefined ? null : details
+        });
+    }
+
+    function classExists(className) {
+        try {
+            Java.use(className);
+            return true;
+        } catch (_) {
+            return false;
+        }
+    }
+
+    function tryLoadDex(dexPath) {
+        try {
+            Java.openClassFile(dexPath).load();
+            return { ok: true, error: "" };
+        } catch (error) {
+            return { ok: false, error: String(error) };
+        }
+    }
+
+    function ensureRadarDex(requiredClasses) {
+        var dexPath = "/data/local/tmp/radar.dex";
+        var classes = requiredClasses || ["gz.radar.Android"];
+        var i;
+
+        for (i = 0; i < classes.length; i++) {
+            if (!classExists(classes[i])) {
+                break;
+            }
+        }
+        if (i === classes.length) {
+            return true;
+        }
+
+        var loadResult = tryLoadDex(dexPath);
+        var missing = [];
+        for (i = 0; i < classes.length; i++) {
+            if (!classExists(classes[i])) {
+                missing.push(classes[i]);
+            }
+        }
+        if (missing.length === 0) {
+            emitLog("log", "dependency", "已加载 radar.dex 依赖。", {
+                dexPath: dexPath,
+                classes: classes
+            });
+            return true;
+        }
+
+        emitLog("error", "dependency", "radar.dex 未就绪，已跳过当前功能。", {
+            dexPath: dexPath,
+            missingClasses: missing,
+            loadError: loadResult.error || "",
+            hint: "请先点击“准备环境并刷新 App”，确认 radar.dex 已部署到设备后重试。"
+        });
+        return false;
+    }
+
+    global.Hookers = {
+        emitLog: emitLog,
+        info: function (category, message, details) {
+            emitLog("log", category, message, details);
+        },
+        warn: function (category, message, details) {
+            emitLog("warn", category, message, details);
+        },
+        error: function (category, message, details) {
+            emitLog("error", category, message, details);
+        },
+        event: function (category, message, details) {
+            emitLog("log", category, message, details);
+        },
+        classExists: classExists,
+        ensureRadarDex: ensureRadarDex,
+        buildStack: buildStack
+    };
+})(typeof globalThis !== "undefined" ? globalThis : this);
+"""
+
 
 class SessionService:
     # 负责 Frida attach/spawn 会话的创建、维护和清理。
@@ -70,7 +188,10 @@ class SessionService:
     def frida_device(self):
         # 懒校验 Frida 设备对象。
         if self.context.frida_device is None:
-            raise RuntimeError("Frida device is not ready")
+            raise FridaDeviceNotReadyError(
+                "Frida 设备尚未就绪。",
+                hint="请先准备环境，并确认 rusda 服务可用后再重试。",
+            )
         return self.context.frida_device
 
     def _on_message(self, message, data) -> None:
@@ -78,6 +199,9 @@ class SessionService:
         msg_type = message.get("type")
         if msg_type == "send":
             payload = message.get("payload")
+            if isinstance(payload, dict) and payload.get("type") == "hookers_log":
+                self.context.emit(self._format_structured_script_log(payload))
+                return
             if isinstance(payload, dict) and payload.get("type") == "console":
                 level = payload.get("level", "log")
                 text = payload.get("message", "")
@@ -98,6 +222,15 @@ class SessionService:
                     payload.get("content") or "",
                 )
                 return
+            if isinstance(payload, dict) and payload.get("type") == "auto_stop":
+                self.context.emit_session_event(
+                    "auto_stop_requested",
+                    {
+                        "reason": payload.get("reason") or "script-requested",
+                        "message": payload.get("message") or "",
+                    },
+                )
+                return
             self.context.emit(f"[*] {payload}")
             return
         if msg_type == "error":
@@ -111,6 +244,32 @@ class SessionService:
             return
         self.context.emit(str(message))
 
+    def _format_structured_script_log(self, payload: dict) -> str:
+        level = str(payload.get("level") or "log")
+        category = str(payload.get("category") or "general").strip()
+        message = str(payload.get("message") or "").strip()
+        details = payload.get("details")
+
+        prefix = "[JS]"
+        if level == "warn":
+            prefix = "[JS:WARN]"
+        elif level == "error":
+            prefix = "[JS:ERROR]"
+
+        text = f"[{category}] {message}" if category else message
+        if details not in (None, "", [], {}):
+            if isinstance(details, str):
+                detail_text = details
+            else:
+                try:
+                    detail_text = json.dumps(
+                        details, ensure_ascii=False, separators=(",", ":")
+                    )
+                except Exception:
+                    detail_text = str(details)
+            text = f"{text}\n{detail_text}" if text else detail_text
+        return f"{prefix} {text}".rstrip()
+
     def handle_script_message(self, message, data) -> None:
         # 对外公开的脚本消息处理入口，避免其他服务依赖私有实现。
         self._on_message(message, data)
@@ -119,7 +278,10 @@ class SessionService:
         # 读取脚本，并在尾部拼接项目内置清理脚本。
         source = self.workspace_service.read_local_file(script_path)
         if source is None:
-            raise FileNotFoundError(f"脚本不存在: {script_path}")
+            raise ScriptFileMissingError(
+                f"脚本不存在: {script_path}",
+                hint="请确认左侧脚本列表中的目标文件仍然存在，并且工作目录脚本已正确同步。",
+            )
         return self._compose_script_code(script_path, source)
 
     def _compose_script_code(
@@ -133,7 +295,12 @@ class SessionService:
         # 先注入 console bridge，再加载业务脚本和清理 warp，
         # 这样 hook.js 中大量 console.log(...) 也会被宿主捕获到。
         return (
-            CONSOLE_BRIDGE_JS + "\n\n" + source + ("\n\n\n" + warp if append_cleanup_warp else "")
+            HOOKERS_SCRIPT_BRIDGE_JS
+            + "\n\n"
+            + CONSOLE_BRIDGE_JS
+            + "\n\n"
+            + source
+            + ("\n\n\n" + warp if append_cleanup_warp else "")
         )
 
     def _build_session(
@@ -192,7 +359,10 @@ class SessionService:
     def _require_current_app(self):
         # 返回当前应用上下文，并在缺失时立即报错。
         if self.context.current_app is None:
-            raise RuntimeError("当前未选择应用")
+            raise CurrentAppMissingError(
+                "当前未选择应用。",
+                hint="请先准备环境并选择一个目标 App 后再继续。",
+            )
         return self.context.current_app
 
     def require_current_app(self):
@@ -203,7 +373,10 @@ class SessionService:
         # attach/RPC 前强制校验 PID，避免向 Frida 传入空值。
         app = self._require_current_app()
         if app.pid is None:
-            raise RuntimeError("当前应用没有可用 PID，请先启动或刷新应用")
+            raise CurrentPidMissingError(
+                "当前应用没有可用 PID，请先启动或刷新应用。",
+                hint="请先启动目标 App，或点击“准备环境并刷新 App”后重试。",
+            )
         return app.pid
 
     def require_current_pid(self) -> int:
@@ -225,13 +398,20 @@ class SessionService:
             except Exception as exc:
                 refreshed_pid = self.device_service.refresh_current_app_pid(app.identifier)
                 if refreshed_pid is None or refreshed_pid == pid:
-                    raise RuntimeError(
-                        f"attach stage failed for {app.identifier} (pid {pid}): {exc}"
+                    raise AttachStageError(
+                        f"attach 阶段失败: {app.identifier} (pid {pid}) -> {exc}",
+                        hint="请检查目标 App 是否仍在运行、当前 attach 模式是否正确，并确认 rusda 服务状态正常。",
                     ) from exc
                 self.context.emit(
                     f"[*] 检测到 attach 目标 PID 已变化，重试 attach: {pid} -> {refreshed_pid}"
                 )
-                session = self.frida_device.attach(refreshed_pid)
+                try:
+                    session = self.frida_device.attach(refreshed_pid)
+                except Exception as exc:
+                    raise AttachStageError(
+                        f"attach 阶段失败: {app.identifier} (pid {refreshed_pid}) -> {exc}",
+                        hint="请检查目标 App 是否仍在运行、当前 attach 模式是否正确，并确认 rusda 服务状态正常。",
+                    ) from exc
             script = (
                 session.create_script(script_jscode, runtime="v8")
                 if use_v8
@@ -258,15 +438,17 @@ class SessionService:
             try:
                 pid = self.frida_device.spawn([app.identifier])
             except Exception as exc:
-                raise RuntimeError(
-                    f"spawn stage failed for {app.identifier}: {exc}"
+                raise SpawnStageError(
+                    f"spawn 阶段失败: {app.identifier} -> {exc}",
+                    hint="请检查目标 App 状态、当前 spawn 模式以及设备侧 rusda 服务是否正常。",
                 ) from exc
             app.pid = pid
             try:
                 session = self.frida_device.attach(pid)
             except Exception as exc:
-                raise RuntimeError(
-                    f"attach stage failed for {app.identifier} (pid {pid}): {exc}"
+                raise AttachStageError(
+                    f"attach 阶段失败: {app.identifier} (pid {pid}) -> {exc}",
+                    hint="请检查目标 App 是否仍在运行、当前 attach/spawn 模式是否正确，并确认 rusda 服务状态正常。",
                 ) from exc
             try:
                 script = (
@@ -277,8 +459,9 @@ class SessionService:
                 script.on("message", self._on_message)
                 script.load()
             except Exception as exc:
-                raise RuntimeError(
-                    f"script load stage failed for {script_path.name}: {exc}"
+                raise ScriptLoadStageError(
+                    f"脚本加载阶段失败: {script_path.name} -> {exc}",
+                    hint="请检查脚本内容、目标进程运行状态，以及脚本是否依赖特定注入时机。",
                 ) from exc
 
             try:
@@ -292,8 +475,9 @@ class SessionService:
                 else:
                     self.frida_device.resume(app.identifier)
             except Exception as exc:
-                raise RuntimeError(
-                    f"resume stage failed for {app.identifier} (pid {pid}): {exc}"
+                raise ResumeStageError(
+                    f"resume 阶段失败: {app.identifier} (pid {pid}) -> {exc}",
+                    hint="请检查目标 App 是否仍然存活，并确认 spawn 注入后的恢复流程没有被 ROM 或反调试逻辑拦截。",
                 ) from exc
             return self._build_session(session, script, script_path, "spawn", use_v8=use_v8)
         except Exception:
@@ -314,23 +498,38 @@ class SessionService:
         # 先从共享上下文中摘掉当前会话，避免停止过程中 UI 仍然把它当成活跃会话。
         self.context.active_session = None
 
+        cleanup_called = False
         if hook_session.script is not None:
             try:
-                hook_session.script.unload()
+                exports_sync = getattr(hook_session.script, "exports_sync", None)
+                if exports_sync is not None and hasattr(exports_sync, "cleanup"):
+                    exports_sync.cleanup()
+                    cleanup_called = True
             except Exception as exc:
-                self.context.emit(f"脚本卸载异常: {exc}")
+                self.context.emit(f"脚本清理异常: {exc}")
         if hook_session.session is not None:
             try:
                 hook_session.session.detach()
             except Exception as exc:
                 self.context.emit(f"会话清理异常: {exc}")
+        if hook_session.script is not None and not cleanup_called:
+            try:
+                hook_session.script.unload()
+            except Exception as exc:
+                self.context.emit(f"脚本卸载异常: {exc}")
 
     def restart_current_app(self) -> None:
         # 重启当前应用，并把新的 PID 回写到上下文。
         app = self._require_current_app()
         self.context.emit(f"正在重启 {app.name}，请稍候...")
-        self.device_service.adb_device.app_stop(app.identifier)
-        pid, name = self.device_service.start_app(app.identifier)
+        try:
+            self.device_service.adb_device.app_stop(app.identifier)
+            pid, name = self.device_service.start_app(app.identifier)
+        except Exception as exc:
+            raise RestartAppError(
+                f"重启 App 失败: {app.identifier} -> {exc}",
+                hint="请检查目标 App 是否仍可启动，并确认设备连接和 root 状态正常。",
+            ) from exc
         app.pid = pid
         if name:
             app.name = name

@@ -50,6 +50,7 @@ class HookerContext:
     project_root: Path
     mobile_deploy_dir: Path
     js_dir: Path
+    hookers_js_dir: Path
     workspaces_dir: Path
     remote_frida_dir: str = "/data/local/tmp"
     remote_frida_server_name: str = "rusda-16.2.1"
@@ -62,6 +63,10 @@ class HookerContext:
     current_local_apk_path: Optional[Path] = None
     active_session: Optional[HookSession] = None
     webserver_url: Optional[str] = None
+    last_connected_device_serial: Optional[str] = None
+    last_prepare_frida_server_status: Optional[str] = None
+    last_workspace_prepare_mode: Optional[str] = None
+    last_workspace_apk_status: Optional[str] = None
     log_handler: Optional[LogHandler] = None
     session_event_handler: Optional[SessionEventHandler] = None
 
@@ -99,6 +104,7 @@ class HookerContext:
             project_root=root,
             mobile_deploy_dir=root / "mobile-deploy",
             js_dir=root / "js",
+            hookers_js_dir=root / "hookers" / "js",
             workspaces_dir=root / "workspaces",
             log_handler=log_handler,
         )

@@ -4,6 +4,8 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+from .errors import ApkScanExecutionError
+
 
 class ApkScanService:
     # 本地 APK 扫描服务。
@@ -26,13 +28,22 @@ class ApkScanService:
     def scan_apk(self, apk_path: str | Path) -> dict[str, Any]:
         exe_path = self.context.local_apk_check_pack_exe
         if not exe_path.is_file():
-            raise RuntimeError(f"未找到 APK 扫描工具：{exe_path}")
+            raise ApkScanExecutionError(
+                f"未找到 APK 扫描工具：{exe_path}",
+                hint="请检查 mobile-deploy 目录中的 ApkCheckPack.exe 是否存在。",
+            )
 
         target_apk = Path(apk_path).expanduser().resolve()
         if not target_apk.is_file():
-            raise RuntimeError(f"APK 文件不存在：{target_apk}")
+            raise ApkScanExecutionError(
+                f"APK 文件不存在：{target_apk}",
+                hint="请确认所选文件仍存在且路径可访问后重试。",
+            )
         if target_apk.suffix.lower() != ".apk":
-            raise RuntimeError(f"只能扫描 .apk 文件：{target_apk}")
+            raise ApkScanExecutionError(
+                f"只能扫描 .apk 文件：{target_apk}",
+                hint="请重新选择一个以 .apk 结尾的本地文件。",
+            )
 
         completed = subprocess.run(
             [str(exe_path), "-f", str(target_apk)],
