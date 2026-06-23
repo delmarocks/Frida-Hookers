@@ -36,3 +36,7 @@ hook_da5_outputs/
 tmp/
 .tmp_verify_env/
 .tmp*/
+
+# Generated / vendored JS agent artifacts
+frida17-agent/.generated/
+frida17-agent/node_modules/
