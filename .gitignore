@@ -11,10 +11,13 @@ venv/
 # Tool caches
 .cache/
 .uv-cache/
+.pytest_cache/
 
 # IDE / editor
 .idea/
 .vscode/
+.claude/
+.agents/
 
 # OS files
 .DS_Store
@@ -23,9 +26,13 @@ Thumbs.db
 # Runtime logs and local outputs
 *.log
 log.txt
+pytest*.log
 
 # Generated per-app workspaces
 workspaces/
 
 # Local helper artifacts
 hook_da5_outputs/
+tmp/
+.tmp_verify_env/
+.tmp*/
