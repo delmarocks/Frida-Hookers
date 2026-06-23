@@ -7,7 +7,7 @@ import pytest
 from ui.composition import MainWindowControllers
 from ui.composition import build_main_window_controllers, wire_main_window_controller_signals
 from ui.main_window import MainWindow, MainWindowDependencies
-from ui.quick_hook_actions import QUICK_HOOK_ACTIONS
+from ui.quick_hook_actions import ANALYSIS_SCENARIO_PROFILES, QUICK_HOOK_ACTIONS
 
 
 def build_main_window(dummy_deps):
@@ -127,6 +127,8 @@ def _build_fake_window_for_wiring():
     )
     for action in QUICK_HOOK_ACTIONS:
         setattr(window, action.button_attr, _FakeButton())
+    for profile in ANALYSIS_SCENARIO_PROFILES:
+        setattr(window, profile.button_attr, _FakeButton())
     return window
 
 
@@ -155,6 +157,7 @@ def _build_fake_controllers():
             stop_frida_server=lambda *args, **kwargs: None,
             restart_current_app=lambda *args, **kwargs: None,
             start_advanced_frida_launcher=lambda *args, **kwargs: None,
+            open_analysis_scenario_as_template=lambda *args, **kwargs: None,
             start_trace_init_proc=lambda *args, **kwargs: None,
             start_quick_hook=lambda *args, **kwargs: None,
         ),
@@ -207,6 +210,7 @@ def test_wire_main_window_controller_signals_is_idempotent() -> None:
         window.view_activity_button.clicked,
         window.view_service_button.clicked,
         *[getattr(window, action.button_attr).clicked for action in QUICK_HOOK_ACTIONS],
+        *[getattr(window, profile.button_attr).clicked for profile in ANALYSIS_SCENARIO_PROFILES],
         window.object_info_button.clicked,
         window.object_explain_button.clicked,
         window.view_info_button.clicked,

@@ -27,6 +27,27 @@ class QuickHookGroup:
     action_keys: tuple[str, ...]
 
 
+@dataclass(frozen=True, slots=True)
+class ScenarioEntry:
+    action_key: str
+    required: bool = True
+
+
+@dataclass(frozen=True, slots=True)
+class AnalysisScenarioProfile:
+    key: str
+    button_attr: str
+    button_label: str
+    title: str
+    description: str
+    mode_hint: str
+    action_log: str
+    busy_message: str
+    entries: tuple[ScenarioEntry, ...]
+    expected_findings: tuple[str, ...] = ()
+    next_steps: tuple[str, ...] = ()
+
+
 QUICK_HOOK_ACTIONS: tuple[QuickHookAction, ...] = (
     QuickHookAction(
         key="detect_network_stack",
@@ -278,3 +299,106 @@ QUICK_HOOK_GROUPS: tuple[QuickHookGroup, ...] = (
 
 QUICK_HOOK_ACTIONS_BY_KEY = {action.key: action for action in QUICK_HOOK_ACTIONS}
 QUICK_HOOK_BUTTON_ATTRS = tuple(action.button_attr for action in QUICK_HOOK_ACTIONS)
+
+ANALYSIS_SCENARIO_PROFILES: tuple[AnalysisScenarioProfile, ...] = (
+    AnalysisScenarioProfile(
+        key="network_baseline",
+        button_attr="network_baseline_scene_button",
+        button_label="首轮网络分析",
+        title="首轮网络分析",
+        description="先探测网络栈，再观察 URL 与 OkHttp 拦截器，适合第一次摸清请求链路。",
+        mode_hint=ui_messages.ANALYSIS_SCENARIO_MODE_HINT_ATTACH_OR_SPAWN,
+        action_log=ui_messages.ANALYSIS_SCENARIO_NETWORK_ACTION_LOG,
+        busy_message=ui_messages.STARTING_ANALYSIS_SCENARIO,
+        entries=(
+            ScenarioEntry("detect_network_stack"),
+            ScenarioEntry("print_okhttp_interceptors"),
+            ScenarioEntry("url_trace"),
+        ),
+        expected_findings=(
+            "识别当前 App 使用的网络栈/客户端实现",
+            "确认是否存在 OkHttp 拦截器与典型 URL 输出",
+            "为后续请求参数、响应链路定位建立入口",
+        ),
+        next_steps=(
+            "若确认存在 OkHttp，请继续抓请求/响应或补 SSL Pinning 相关脚本。",
+            "若只看到 URL 未见请求体，请继续补点击链路或加密调用观察。",
+        ),
+    ),
+    AnalysisScenarioProfile(
+        key="ui_baseline",
+        button_attr="ui_baseline_scene_button",
+        button_label="首轮页面行为分析",
+        title="首轮页面行为分析",
+        description="优先观察页面跳转、点击与文本变化，适合快速摸清当前界面交互。",
+        mode_hint=ui_messages.ANALYSIS_SCENARIO_MODE_HINT_ATTACH_PREFERRED,
+        action_log=ui_messages.ANALYSIS_SCENARIO_UI_ACTION_LOG,
+        busy_message=ui_messages.STARTING_ANALYSIS_SCENARIO,
+        entries=(
+            ScenarioEntry("activity_events_trace"),
+            ScenarioEntry("click_trace"),
+            ScenarioEntry("text_view_trace"),
+        ),
+        expected_findings=(
+            "确认关键页面跳转顺序与生命周期节奏",
+            "识别核心按钮点击与文本展示变化",
+            "定位后续更精细 Hook 的界面入口",
+        ),
+        next_steps=(
+            "若已定位关键页面，请结合 URL / 加密 / RPC 继续缩小分析范围。",
+            "若页面变化太快，可切回 Attach 并只保留页面相关脚本复跑。",
+        ),
+    ),
+    AnalysisScenarioProfile(
+        key="native_baseline",
+        button_attr="native_baseline_scene_button",
+        button_label="首轮 JNI / Native 分析",
+        title="首轮 JNI / Native 分析",
+        description="先看 RegisterNatives，再进入参数化 JNI 跟踪，适合 Native 入口摸底。",
+        mode_hint=ui_messages.ANALYSIS_SCENARIO_MODE_HINT_SPAWN_PREFERRED,
+        action_log=ui_messages.ANALYSIS_SCENARIO_NATIVE_ACTION_LOG,
+        busy_message=ui_messages.STARTING_ANALYSIS_SCENARIO,
+        entries=(
+            ScenarioEntry("hook_register_natives"),
+            ScenarioEntry("jni_method_trace"),
+        ),
+        expected_findings=(
+            "观察 RegisterNatives 注册行为与目标 so",
+            "进入参数化 JNI runtime 跟踪具体 native 入口",
+            "为后续导符号、trace init_proc 或静态分析提供证据",
+        ),
+        next_steps=(
+            "若已命中目标 so，请优先围绕该 so 做 trace 或导出符号分析。",
+            "若尚未命中，请改用 Spawn 或补 init_proc 范围跟踪。",
+        ),
+    ),
+    AnalysisScenarioProfile(
+        key="anti_detection_baseline",
+        button_attr="anti_detection_baseline_scene_button",
+        button_label="首轮反检测验证",
+        title="首轮反检测验证",
+        description="优先观察 anti-Frida 命中，并一起验证 Root / VPN 绕过脚本。",
+        mode_hint=ui_messages.ANALYSIS_SCENARIO_MODE_HINT_SPAWN_PREFERRED,
+        action_log=ui_messages.ANALYSIS_SCENARIO_BYPASS_ACTION_LOG,
+        busy_message=ui_messages.STARTING_ANALYSIS_SCENARIO,
+        entries=(
+            ScenarioEntry("find_anti_frida_so"),
+            ScenarioEntry("bypass_root_detect"),
+            ScenarioEntry("bypass_vpn_detect"),
+        ),
+        expected_findings=(
+            "确认是否存在 Anti-Frida 命中与相关 so 线索",
+            "验证 Root / VPN 检测是否影响目标流程",
+            "为后续定点绕过与稳定注入准备最小证据链",
+        ),
+        next_steps=(
+            "若命中 Anti-Frida，请先确认是否影响注入稳定性，再决定是否补 bypass。",
+            "若 Root/VPN 仍拦截核心流程，请继续改成专项脚本单独验证。",
+        ),
+    ),
+)
+
+ANALYSIS_SCENARIO_PROFILES_BY_KEY = {
+    profile.key: profile for profile in ANALYSIS_SCENARIO_PROFILES
+}
+ANALYSIS_SCENARIO_BUTTON_ATTRS = tuple(profile.button_attr for profile in ANALYSIS_SCENARIO_PROFILES)

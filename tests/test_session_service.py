@@ -30,6 +30,7 @@ from core.errors import (
     CurrentAppMissingError,
     CurrentPidMissingError,
     FridaDeviceNotReadyError,
+    ResumeStageError,
     ScriptFileMissingError,
     ScriptLoadStageError,
     SpawnStageError,
@@ -317,3 +318,44 @@ def test_stop_active_session_prefers_cleanup_then_detach(workspace_context, samp
 
     assert workspace_context.active_session is None
     assert calls == ["cleanup", "detach"]
+
+
+def test_spawn_script_restores_previous_pid_when_resume_stage_fails(
+    workspace_context, sample_app_context, tmp_path: Path
+) -> None:
+    service, device_service = build_session_service(workspace_context, sample_app_context)
+    script_path = write_script(tmp_path)
+    previous_pid = 4321
+    workspace_context.current_app.pid = previous_pid
+
+    class FakeScript:
+        def on(self, event: str, handler) -> None:
+            return None
+
+        def load(self) -> None:
+            return None
+
+    class FakeSession:
+        def create_script(self, source: str, runtime: str | None = None) -> FakeScript:
+            return FakeScript()
+
+        def detach(self) -> None:
+            return None
+
+    class FakeFridaDevice:
+        def spawn(self, argv: list[str]) -> int:
+            return 5678
+
+        def attach(self, pid: int) -> FakeSession:
+            return FakeSession()
+
+        def resume(self, target) -> None:
+            raise RuntimeError("resume boom")
+
+    workspace_context.frida_device = FakeFridaDevice()
+    device_service.adb_device.prop = {"ro.build.version.release": "13"}
+
+    with pytest.raises(ResumeStageError):
+        service.spawn_script(str(script_path))
+
+    assert workspace_context.current_app.pid == previous_pid

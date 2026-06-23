@@ -29,6 +29,146 @@ from core.errors import AppNotRunningError, DeviceError, FridaServerStartError, 
 from core.models import AppContext
 
 
+def test_get_forwarded_frida_device_removes_remote_device_after_probe_failure(
+    workspace_context,
+) -> None:
+    service = DeviceService(workspace_context)
+    workspace_context.adb_device = types.SimpleNamespace(serial="device-1")
+
+    forwarded = []
+    removed = []
+
+    class FakeRemoteDevice:
+        def enumerate_processes(self):
+            raise RuntimeError("probe boom")
+
+    fake_manager = types.SimpleNamespace(
+        add_remote_device=lambda address: forwarded.append(address) or FakeRemoteDevice(),
+        remove_remote_device=lambda device: removed.append(device),
+    )
+    original_get_manager = frida_module.get_device_manager
+    frida_module.get_device_manager = lambda: fake_manager
+    service._ensure_adb_forward = lambda local_port, remote_port: forwarded.append(
+        f"forward:{local_port}->{remote_port}"
+    )
+
+    try:
+        with pytest.raises(RuntimeError, match="probe boom"):
+            service._get_forwarded_frida_device(remote_port=27042, local_port=27052)
+    finally:
+        frida_module.get_device_manager = original_get_manager
+
+    assert forwarded == ["forward:27052->27042", "127.0.0.1:27052"]
+    assert len(removed) == 1
+
+
+def test_stop_remote_frida_processes_returns_true_after_killing_running_server(
+    workspace_context,
+) -> None:
+    service = DeviceService(workspace_context)
+    workspace_context.adb_device = types.SimpleNamespace(serial="device-1")
+    service.is_root = lambda: True
+    service.get_remote_server_pid = lambda name: "4321"
+    commands = []
+    service.run_root_cmd = lambda cmd: commands.append(cmd) or ""
+
+    assert service.stop_remote_frida_processes() is True
+    assert commands == ["kill -9 4321"]
+
+
+def test_cleanup_remote_frida_files_skips_without_root_and_logs_reason(
+    workspace_context,
+) -> None:
+    service = DeviceService(workspace_context)
+    workspace_context.adb_device = types.SimpleNamespace(serial="device-1")
+    service.is_root = lambda: False
+    messages = []
+    workspace_context.emit = messages.append
+
+    service.cleanup_remote_frida_files()
+
+    assert messages == ["设备没有被 root，跳过远端 Frida 清理"]
+
+
+def test_start_frida_server_reuses_existing_ready_server_without_restart(
+    workspace_context,
+) -> None:
+    service = DeviceService(workspace_context)
+    workspace_context.mobile_deploy_dir.mkdir(parents=True, exist_ok=True)
+    local_binary = workspace_context.mobile_deploy_dir / workspace_context.frida_server_arm64
+    local_binary.write_text("server", encoding="utf-8")
+
+    service.is_root = lambda: True
+    service.get_cpu_arch = lambda: "arm64"
+    service.get_remote_server_pid = lambda name: "4321"
+    service.remote_file_exists = lambda path: True
+    service.is_frida_environment_ready = lambda: True
+
+    side_effects = []
+    service.remote_dir_exists = lambda path: side_effects.append(f"remote_dir:{path}") or True
+    service.stop_remote_frida_processes = lambda: side_effects.append("stop")
+    service.push_file_to_remote = lambda local_path, remote_path: side_effects.append("push")
+    service.run_root_cmd = lambda cmd, read_output=True: side_effects.append(cmd) or ""
+
+    service.start_frida_server()
+
+    assert workspace_context.last_prepare_frida_server_status == "reused"
+    assert side_effects == []
+
+
+def test_start_frida_server_reports_pid_ports_and_log_when_probe_never_recovers(
+    workspace_context, monkeypatch
+) -> None:
+    service = DeviceService(workspace_context)
+    workspace_context.mobile_deploy_dir.mkdir(parents=True, exist_ok=True)
+    local_binary = workspace_context.mobile_deploy_dir / workspace_context.frida_server_arm64
+    local_binary.write_text("server", encoding="utf-8")
+
+    service.is_root = lambda: True
+    service.get_cpu_arch = lambda: "arm64"
+    service.get_remote_server_pid = lambda name: None
+    service.remote_file_exists = lambda path: False if path.endswith("rusda-server-16.2.1") else False
+    service.remote_dir_exists = lambda path: True
+    service.stop_remote_frida_processes = lambda: False
+    service.push_file_to_remote = lambda local_path, remote_path: None
+    commands = []
+    service.run_root_cmd = lambda cmd, read_output=True: commands.append((cmd, read_output)) or ""
+
+    readiness = iter([False] * 20)
+    service.is_frida_environment_ready = lambda: next(readiness)
+    service.get_remote_server_pid = lambda name: "4321"
+    service.get_remote_server_ports = lambda name: [27042, 27043]
+    service.read_remote_start_log = lambda max_lines=80: "line1\nfatal boom"
+    messages = []
+    workspace_context.emit = messages.append
+    monkeypatch.setattr("core.device_service.time.sleep", lambda _seconds: None)
+
+    with pytest.raises(FridaServerStartError) as exc_info:
+        service.start_frida_server()
+
+    message = str(exc_info.value)
+    assert "pid=4321" in message
+    assert "ports=27042,27043" in message
+    assert "log=fatal boom" in message
+    assert any("远端 Frida Server 启动日志" in line for line in messages)
+    assert any("fatal boom" in line for line in messages)
+
+
+def test_start_app_returns_latest_process_when_foreground_never_matches(
+    workspace_context, monkeypatch
+) -> None:
+    service = DeviceService(workspace_context)
+    service.adb_shell = lambda cmd: ""
+    service._is_app_in_foreground = lambda package_name: False
+    service._find_running_process = lambda package_name, refresh_apps=False: (9876, "Demo App")
+    monkeypatch.setattr("core.device_service.time.sleep", lambda _seconds: None)
+
+    pid, name = service.start_app("com.example.demo")
+
+    assert pid == 9876
+    assert name == "Demo App"
+
+
 def test_parse_package_apk_path_prefers_base_apk(workspace_context) -> None:
     service = DeviceService(workspace_context)
     service.adb_shell = lambda cmd: "\n".join(

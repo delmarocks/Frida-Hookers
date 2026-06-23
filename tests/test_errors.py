@@ -26,6 +26,7 @@ def test_to_ui_error_payload_preserves_hookers_error_metadata() -> None:
     assert payload.message == ui_messages.MISSING_HOOK_TARGET_BODY
     assert payload.category == "rpc"
     assert payload.severity == "warning"
+    assert payload.focus_target == "hook_target_input"
 
 
 def test_to_ui_error_payload_falls_back_for_generic_exception() -> None:
@@ -33,6 +34,7 @@ def test_to_ui_error_payload_falls_back_for_generic_exception() -> None:
     assert payload.title == ui_messages.ERROR_DIALOG_TITLE
     assert payload.message == "boom"
     assert payload.severity == "critical"
+    assert payload.focus_target is None
 
 
 def test_to_ui_error_payload_preserves_session_stage_error_metadata() -> None:
@@ -53,6 +55,13 @@ def test_to_ui_error_payload_preserves_workspace_error_metadata() -> None:
     assert payload.category == "workspace"
 
 
+def test_to_ui_error_payload_preserves_next_step_metadata() -> None:
+    exc = AppNotRunningError("目标 App 未运行")
+    payload = to_ui_error_payload(exc)
+    assert payload.next_step is not None
+    assert "Spawn" in payload.next_step
+
+
 def test_to_ui_error_payload_preserves_app_workflow_warning_metadata() -> None:
     exc = WorkspaceAppNotSelectedError(ui_messages.WORKSPACE_APP_NOT_SELECTED_BODY)
     payload = to_ui_error_payload(exc)
@@ -60,6 +69,7 @@ def test_to_ui_error_payload_preserves_app_workflow_warning_metadata() -> None:
     assert payload.message == ui_messages.WORKSPACE_APP_NOT_SELECTED_BODY
     assert payload.category == "app_workflow"
     assert payload.severity == "warning"
+    assert payload.focus_target == "app_combo"
 
 
 def test_to_ui_error_payload_preserves_no_apps_found_warning_metadata() -> None:

@@ -49,6 +49,7 @@ class WorkspaceServiceLike(Protocol):
     def script_dir(self, package_name: str) -> Path: ...
     def list_scripts(self, package_name: str) -> list[Path]: ...
     def script_names(self, package_name: str) -> list[str]: ...
+    def available_script_names(self, package_name: str) -> list[str]: ...
     def materialize_multi_script_bundle(
         self,
         package_name: str,
@@ -84,6 +85,7 @@ class GuiDepsLike(Protocol):
 BusySetter = Callable[[bool, str | None], None]
 StatusSetter = Callable[[str, str | None], None]
 LogAppender = Callable[[str], None]
+FocusTargetSetter = Callable[[str], None]
 ScriptRootApplier = Callable[[Path], None]
 SelectedScriptProvider = Callable[[], Path | None]
 SelectedPackageProvider = Callable[[], str | None]
@@ -100,10 +102,12 @@ class UiErrorPayload:
     title: str
     message: str
     hint: str | None
+    next_step: str | None
     category: str
     log_level: str
     user_visible: bool
     severity: str
+    focus_target: str | None = None
 
 
 def ensure_ui_error_payload(value: UiErrorPayload | str) -> UiErrorPayload:
@@ -113,10 +117,12 @@ def ensure_ui_error_payload(value: UiErrorPayload | str) -> UiErrorPayload:
         title="执行失败",
         message=str(value),
         hint=None,
+        next_step=None,
         category="general",
         log_level="error",
         user_visible=True,
         severity="critical",
+        focus_target=None,
     )
 
 

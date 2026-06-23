@@ -109,7 +109,8 @@ def test_on_package_changed_switches_default_script_root_to_workspace_script_dir
     assert widgets.workspace_path_input.text() == str(workspace_dir)
     assert ui_messages.WORKSPACE_PATH_LOG.format(workspace_dir=workspace_dir) in logs
     assert ui_messages.WORKSPACE_SCRIPT_DIR_LOG.format(script_dir=script_dir) in logs
-    assert logs[-1] == ui_messages.WORKSPACE_NOT_INITIALIZED_LOG
+    assert ui_messages.WORKSPACE_NOT_INITIALIZED_LOG in logs
+    assert len(logs) == 3
 
 
 def test_on_package_changed_does_not_sync_builtin_scripts_before_workspace_prepare(

@@ -1,0 +1,141 @@
+from __future__ import annotations
+
+BUILTIN_SCRIPT_DEFAULT_METADATA: dict[str, dict[str, object]] = {
+    "detect_network_stack.js": {
+        "recommended_mode": "either",
+        "summary": "探测目标 App 当前网络栈",
+        "tags": ("network",),
+        "use_when": "首轮摸底网络请求链路、还不确定目标使用哪种网络库时使用。",
+        "caution": "这是探测脚本；拿到网络栈结论后，建议切换到更有针对性的网络观察脚本。",
+    },
+    "print_okhttp_interceptors.js": {
+        "recommended_mode": "attach",
+        "summary": "查看当前进程中的 OkHttp 拦截器",
+        "tags": ("network", "okhttp"),
+        "use_when": "已怀疑目标使用 OkHttp，想先确认拦截器链路或三方加固插桩时使用。",
+        "caution": "只适合 OkHttp 场景；若未命中 OkHttp，应先回退到网络栈探测。",
+    },
+    "okhttp.js": {
+        "recommended_mode": "attach",
+        "summary": "抓取 OkHttp 请求与响应",
+        "tags": ("network", "okhttp"),
+        "use_when": "确认目标使用 OkHttp，并希望直接观察请求/响应、Header、Body 时使用。",
+        "caution": "若关键请求发生在冷启动早期，Attach 可能错过时机；必要时改用 Spawn 验证。",
+    },
+    "hook_register_natives.js": {
+        "recommended_mode": "spawn",
+        "summary": "监控 Native 层 RegisterNatives 调用",
+        "tags": ("native", "jni"),
+        "use_when": "要摸清 JNI 注册表、native 方法映射、so 初始化入口时优先使用。",
+        "caution": "更适合冷启动早期；Attach 太晚可能已经错过注册过程。",
+    },
+    "jni_method_trace.js": {
+        "recommended_mode": "spawn",
+        "summary": "按目标 so 跟踪 JNI 调用",
+        "tags": ("native", "jni"),
+        "use_when": "已经知道目标 so，准备围绕 JNI 调用链做定点跟踪时使用。",
+        "caution": "必须先给出正确的 so 名；so 名错误时不会得到有效结果。",
+    },
+    "trace_init_proc.js": {
+        "recommended_mode": "spawn",
+        "summary": "按地址范围跟踪 init_proc 执行",
+        "tags": ("native",),
+        "use_when": "已拿到目标 so 和 init_proc 地址范围，准备观察初始化逻辑时使用。",
+        "caution": "参数依赖静态分析结果；地址范围不准时结果噪声会很大。",
+    },
+    "bypass_root_detect.js": {
+        "recommended_mode": "either",
+        "summary": "绕过常见 Root 检测逻辑",
+        "tags": ("bypass",),
+        "use_when": "登录、启动或核心流程疑似受 Root 检测影响时使用。",
+        "caution": "先确认确实存在 Root 检测再启用；不要把 bypass 当成首轮默认脚本。",
+    },
+    "bypass_vpn_detect.js": {
+        "recommended_mode": "either",
+        "summary": "绕过常见 VPN 检测逻辑",
+        "tags": ("bypass", "network"),
+        "use_when": "抓包或代理路径被识别、怀疑 App 有 VPN/代理检测时使用。",
+        "caution": "先确认网络异常与 VPN 检测有关；不要在无证据时默认启用。",
+    },
+    "url.js": {
+        "recommended_mode": "attach",
+        "summary": "观察常见 URL / WebView / 请求链接输出",
+        "tags": ("network", "url"),
+        "use_when": "首轮想快速知道 App 正在访问哪些 URL、页面或接口地址时使用。",
+        "caution": "它更适合快速观察，不等于完整请求链；拿到 URL 后仍要回到更定向的网络脚本。",
+    },
+    "activity_events.js": {
+        "recommended_mode": "attach",
+        "summary": "观察 Activity 生命周期与页面切换事件",
+        "tags": ("ui", "activity"),
+        "use_when": "要先摸清页面跳转、前后台切换、关键界面进入顺序时使用。",
+        "caution": "只告诉你页面事件，不会替代点击链路或控件级观察。",
+    },
+    "text_view.js": {
+        "recommended_mode": "attach",
+        "summary": "观察 TextView 文本更新与界面展示内容",
+        "tags": ("ui", "text"),
+        "use_when": "想快速捕捉关键提示文案、按钮文本、验证码/风控提示时使用。",
+        "caution": "界面文本很多时噪声会较大，最好配合明确页面场景使用。",
+    },
+    "just_trust_me.js": {
+        "recommended_mode": "spawn",
+        "summary": "尝试统一绕过常见 SSL Pinning / 证书校验",
+        "tags": ("network", "ssl", "bypass"),
+        "use_when": "抓包失败、怀疑目标存在证书校验或 SSL Pinning 时优先尝试。",
+        "caution": "并非所有 App 都能一把过；失败时仍要回到具体网络栈或定点 pinning 逻辑分析。",
+    },
+    "find_anit_frida_so.js": {
+        "recommended_mode": "either",
+        "summary": "扫描疑似 Anti-Frida 相关 so / 检测线索",
+        "tags": ("bypass", "anti-frida"),
+        "use_when": "怀疑注入不稳定、闪退或启动即退出与 Anti-Frida so 有关时使用。",
+        "caution": "它更像线索探测脚本；命中后仍需要结合日志或静态分析继续确认。",
+    },
+    "anti_debug.js": {
+        "recommended_mode": "spawn",
+        "summary": "辅助观察或压制常见反调试检查",
+        "tags": ("bypass", "anti-debug"),
+        "use_when": "怀疑目标在冷启动或关键流程里有 ptrace / debugger 检测时使用。",
+        "caution": "更偏启动早期场景；若无明确反调试迹象，不建议当成默认常驻脚本。",
+    },
+    "hook_encryption_algo.js": {
+        "recommended_mode": "attach",
+        "summary": "观察常见加密算法调用与输入输出线索",
+        "tags": ("crypto", "java"),
+        "use_when": "怀疑关键参数、签名或请求体在 Java 层做加密/摘要时使用。",
+        "caution": "命中很多通用算法时噪声较大，最好先缩小业务触发路径后再跑。",
+    },
+    "hook_encryption_algo2.js": {
+        "recommended_mode": "attach",
+        "summary": "补充观察另一组常见加密/摘要调用路径",
+        "tags": ("crypto", "java"),
+        "use_when": "第一组加密算法观察不够、想扩大 Java 层加密命中面时使用。",
+        "caution": "覆盖更宽通常也意味着噪声更大，不适合长时间无选择地常驻。",
+    },
+    "keystore_dump.js": {
+        "recommended_mode": "attach",
+        "summary": "观察或导出 KeyStore / 证书相关使用线索",
+        "tags": ("crypto", "keystore"),
+        "use_when": "怀疑签名、证书固定、客户端证书或密钥材料和 KeyStore 相关时使用。",
+        "caution": "它更适合定位证书/密钥使用链路；不要把它当成通用网络脚本。",
+    },
+    "get_device_info.js": {
+        "recommended_mode": "either",
+        "summary": "收集设备环境信息与常见识别点输出",
+        "tags": ("device", "fingerprint"),
+        "use_when": "想先确认设备指纹、系统版本、硬件标识等环境信息暴露面时使用。",
+        "caution": "它主要提供环境侧基线，不直接说明业务问题，需要结合目标流程理解。",
+    },
+    "replace_dlsym_get_pthread_create.js": {
+        "recommended_mode": "spawn",
+        "summary": "围绕 dlsym / pthread_create 做 native 侧反检测观察或替换",
+        "tags": ("native", "bypass", "anti-frida"),
+        "use_when": "怀疑 native 层通过线程创建或符号解析做反注入/反检测时使用。",
+        "caution": "更偏定点 native 对抗；没有相关迹象时不要优先启用，以免增加噪声。",
+    },
+}
+
+
+def get_builtin_script_default_metadata(script_name: str):
+    return BUILTIN_SCRIPT_DEFAULT_METADATA.get(script_name)

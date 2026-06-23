@@ -21,6 +21,21 @@ from PySide6.QtWidgets import (
 )
 
 from . import ui_messages
+from .display_builders import (
+    ResultSummaryTextSpec,
+    ResultSummaryViewModel,
+    build_result_summary_actions_text,
+    build_result_summary_note_block,
+    build_result_summary_text,
+)
+from .result_summary_rules import build_result_summary_category_rules
+from .result_summary_pipeline import ResultSummarySnapshot, build_result_summary_snapshot
+from .result_summary_extractors import (
+    extract_result_summary_activities,
+    extract_result_summary_jni_registrations,
+    extract_result_summary_security_hits,
+    extract_result_summary_urls,
+)
 
 
 @dataclass
@@ -47,6 +62,40 @@ class LogPanelWidgets:
 
 
 class LogPanelController:
+    RESULT_SUMMARY_CATEGORY_RULES = build_result_summary_category_rules(ui_messages)
+    RESULT_SUMMARY_URL_LIMIT = 8
+    RESULT_SUMMARY_URL_PATTERN = re.compile(r'https?://[^\s"<>]+', re.IGNORECASE)
+    RESULT_SUMMARY_ACTIVITY_LIMIT = 8
+    RESULT_SUMMARY_ACTIVITY_PATTERNS = (
+        re.compile(r'Activity\s*[:：]\s*([A-Za-z0-9_.$/]+)', re.IGNORECASE),
+        re.compile(r'Activity\s*->\s*([A-Za-z0-9_.$/]+)', re.IGNORECASE),
+        re.compile(r'页面跳转\s*[:：]\s*([A-Za-z0-9_.$/]+)', re.IGNORECASE),
+        re.compile(r'Activity\s+changed\s+to\s+([A-Za-z0-9_.$/]+)', re.IGNORECASE),
+        re.compile(r'onResume\s*[:：]\s*([A-Za-z0-9_.$/]+)', re.IGNORECASE),
+    )
+    RESULT_SUMMARY_JNI_LIMIT = 8
+    RESULT_SUMMARY_JNI_PATTERNS = (
+        re.compile(r'\[RegisterNatives\]\s+([A-Za-z0-9_.$/]+)\s*\((\d+)\s+methods?\)', re.IGNORECASE),
+        re.compile(r'\[RegisterNatives\]\s+java_class\s*:\s*([A-Za-z0-9_.$/]+)\s+name\s*:\s*([^\s]+)\s+sig\s*:\s*([^\s]+)', re.IGNORECASE),
+    )
+    RESULT_SUMMARY_ANTI_FRIDA_LIMIT = 8
+    RESULT_SUMMARY_ANTI_FRIDA_PATTERNS = (
+        re.compile(r'anti[-\s]?frida[^\n]*', re.IGNORECASE),
+        re.compile(r'frida\s+detect[^\n]*', re.IGNORECASE),
+    )
+    RESULT_SUMMARY_ROOT_LIMIT = 8
+    RESULT_SUMMARY_ROOT_PATTERNS = (
+        re.compile(r'root\s+detect[^\n]*', re.IGNORECASE),
+        re.compile(r'检测到\s*root[^\n]*', re.IGNORECASE),
+        re.compile(r'绕过[^\n]*root[^\n]*', re.IGNORECASE),
+    )
+    RESULT_SUMMARY_VPN_LIMIT = 8
+    RESULT_SUMMARY_VPN_PATTERNS = (
+        re.compile(r'vpn\s+detect[^\n]*', re.IGNORECASE),
+        re.compile(r'检测到\s*vpn[^\n]*', re.IGNORECASE),
+        re.compile(r'绕过[^\n]*vpn[^\n]*', re.IGNORECASE),
+    )
+
     # 独立日志控制器。
     #
     # 这一层只接管日志状态、搜索、渲染和落盘逻辑，
@@ -59,11 +108,15 @@ class LogPanelController:
         widgets: LogPanelWidgets,
         status_bar: QStatusBar,
         project_root: Path,
+        selected_package_name=None,
+        selected_script_path=None,
     ) -> None:
         self.owner = owner
         self.widgets = widgets
         self.status_bar = status_bar
         self.project_root = project_root
+        self.selected_package_name = selected_package_name or (lambda: None)
+        self.selected_script_path = selected_script_path or (lambda: None)
 
         self.log_records: list[LogRecord] = []
         self.log_file_path: Path | None = None
@@ -401,6 +454,106 @@ class LogPanelController:
             self.status_bar.showMessage(
                 ui_messages.LOG_WRITE_FAILED_STATUS.format(error=exc)
             )
+
+    def _result_summary_messages(self):
+        for record in self.log_records:
+            yield record.message
+
+    def _extract_result_summary_urls(self) -> tuple[list[str], int]:
+        return extract_result_summary_urls(self._result_summary_messages(), self.RESULT_SUMMARY_URL_PATTERN)
+
+    def _extract_result_summary_activities(self) -> tuple[list[str], int]:
+        return extract_result_summary_activities(self._result_summary_messages(), self.RESULT_SUMMARY_ACTIVITY_PATTERNS)
+
+    def _extract_result_summary_jni_registrations(self) -> tuple[list[str], int]:
+        return extract_result_summary_jni_registrations(self._result_summary_messages(), self.RESULT_SUMMARY_JNI_PATTERNS)
+
+    def _extract_result_summary_security_hits(self, patterns: tuple[re.Pattern[str], ...]) -> tuple[list[str], int]:
+        return extract_result_summary_security_hits(self._result_summary_messages(), patterns)
+
+    def _extract_result_summary_anti_frida_hits(self) -> tuple[list[str], int]:
+        return self._extract_result_summary_security_hits(self.RESULT_SUMMARY_ANTI_FRIDA_PATTERNS)
+
+    def _extract_result_summary_root_hits(self) -> tuple[list[str], int]:
+        return self._extract_result_summary_security_hits(self.RESULT_SUMMARY_ROOT_PATTERNS)
+
+    def _extract_result_summary_vpn_hits(self) -> tuple[list[str], int]:
+        return self._extract_result_summary_security_hits(self.RESULT_SUMMARY_VPN_PATTERNS)
+
+    def build_result_summary_sections(self) -> dict[str, object]:
+        sections: dict[str, object] = {}
+        for rule in self.RESULT_SUMMARY_CATEGORY_RULES:
+            extractor = getattr(self, rule.extractor_name)
+            items, total_hits = extractor()
+            sections[rule.section_key] = items
+            sections[rule.total_hits_key] = total_hits
+        return sections
+
+    def build_result_summary_snapshot(self) -> ResultSummarySnapshot:
+        return build_result_summary_snapshot(
+            self.build_result_summary_sections(),
+            category_rules=self.RESULT_SUMMARY_CATEGORY_RULES,
+        )
+
+    def build_result_summary_view_model(self) -> ResultSummaryViewModel:
+        snapshot = self.build_result_summary_snapshot()
+        note_block = build_result_summary_note_block(
+            snapshot=snapshot,
+            category_rules=self.RESULT_SUMMARY_CATEGORY_RULES,
+            empty_title=ui_messages.RESULT_SUMMARY_NOTE_TITLE,
+            empty_message=ui_messages.RESULT_SUMMARY_NOTE_EMPTY,
+        )
+        actions_text = build_result_summary_actions_text(snapshot.actions)
+        summary_text = build_result_summary_text(
+            snapshot=snapshot,
+            has_log_records=bool(self.log_records),
+            category_rules=self.RESULT_SUMMARY_CATEGORY_RULES,
+            spec=ResultSummaryTextSpec(
+                empty_message=ui_messages.RESULT_SUMMARY_EMPTY,
+                title=ui_messages.RESULT_SUMMARY_TITLE,
+                overview_title=ui_messages.RESULT_SUMMARY_OVERVIEW_TITLE,
+                overview_sections_template=ui_messages.RESULT_SUMMARY_OVERVIEW_SECTIONS,
+                overview_total_events_template=ui_messages.RESULT_SUMMARY_OVERVIEW_TOTAL_EVENTS,
+                overview_unique_items_template=ui_messages.RESULT_SUMMARY_OVERVIEW_UNIQUE_ITEMS,
+                next_step_title=ui_messages.RESULT_SUMMARY_NEXT_STEP_TITLE,
+            ),
+            actions_text=actions_text,
+        )
+        return ResultSummaryViewModel(
+            snapshot=snapshot,
+            summary_text=summary_text,
+            actions_text=actions_text,
+            note_block=note_block,
+        )
+
+    def build_result_summary_actions(self) -> list[dict[str, str]]:
+        return list(self.build_result_summary_view_model().snapshot.actions)
+
+    def build_result_summary_actions_text(self) -> str:
+        return self.build_result_summary_view_model().actions_text
+
+    def build_result_summary_note_block(self) -> str:
+        return self.build_result_summary_view_model().note_block
+
+    def build_result_summary_text(self) -> str:
+        return self.build_result_summary_view_model().summary_text
+
+    def append_transient_view_message(self, message: str, *, color: str = "#9ad1ff") -> None:
+        if not message.strip():
+            return
+        html_fragment = (
+            f'<span style="color: {color}; white-space: pre-wrap;">'
+            f"{escape(message.rstrip())}"
+            "</span><br/>"
+        )
+        if hasattr(self.widgets.log_console, "append_log_html_preserving_prompt"):
+            self.widgets.log_console.append_log_html_preserving_prompt(html_fragment)
+            return
+        cursor = self.widgets.log_console.textCursor()
+        cursor.movePosition(QTextCursor.End)
+        cursor.insertHtml(html_fragment)
+        self.widgets.log_console.setTextCursor(cursor)
+        self.widgets.log_console.ensureCursorVisible()
 
     def choose_log_file(self) -> None:
         file_path, _ = QFileDialog.getSaveFileName(

@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Callable
 
 from PySide6.QtWidgets import QMessageBox, QWidget
 
 from core.errors import HookersError, build_error_message
 
 from . import ui_messages
-from .controller_types import BusySetter, LogAppender, StatusSetter, UiErrorPayload, ensure_ui_error_payload
+from .controller_types import BusySetter, FocusTargetSetter, LogAppender, StatusSetter, UiErrorPayload, ensure_ui_error_payload
 
 
 @dataclass(slots=True)
@@ -24,6 +25,8 @@ def build_error_display_plan(payload: UiErrorPayload) -> UiErrorDisplayPlan:
     log_lines = [f"{ui_messages.ERROR_LOG_PREFIX} {payload.message}"]
     if payload.hint:
         log_lines.append(f"{ui_messages.ERROR_HINT_PREFIX}{payload.hint}")
+    if payload.next_step:
+        log_lines.append(f"{ui_messages.ERROR_NEXT_STEP_PREFIX}{payload.next_step}")
 
     if payload.severity == "warning":
         return UiErrorDisplayPlan(
@@ -51,6 +54,8 @@ class ErrorPresentationContext:
     status_setter: StatusSetter
     busy_setter: BusySetter
     append_log: LogAppender
+    focus_target: FocusTargetSetter | None = None
+    update_recovery_banner: Callable[[str | None, str | None], None] | None = None
 
 
 class ErrorPresenterController:
@@ -65,14 +70,18 @@ class ErrorPresenterController:
         for line in display.log_lines:
             self.context.append_log(line)
         self.context.status_setter(display.state_text, display.status_bar_text)
+        if self.context.update_recovery_banner is not None:
+            self.context.update_recovery_banner(payload.focus_target, payload.next_step)
 
         if not display.show_dialog:
+            self._try_focus(payload.focus_target)
             return
 
         dialog_body = build_error_message(
             HookersError(
                 payload.message,
                 hint=payload.hint,
+                next_step=payload.next_step,
                 category=payload.category,
                 dialog_title=payload.title,
                 log_level=payload.log_level,
@@ -84,3 +93,13 @@ class ErrorPresenterController:
             QMessageBox.warning(self.context.owner, payload.title, dialog_body)
         elif display.dialog_kind == "critical":
             QMessageBox.critical(self.context.owner, payload.title, dialog_body)
+
+        self._try_focus(payload.focus_target)
+
+    def _try_focus(self, focus_target: str | None) -> None:
+        if not focus_target or self.context.focus_target is None:
+            return
+        try:
+            self.context.focus_target(focus_target)
+        except Exception:
+            return

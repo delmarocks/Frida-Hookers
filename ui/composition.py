@@ -8,7 +8,12 @@ from .app_workflow import AppWorkflowController, AppWorkflowWidgets
 from .error_presenter import ErrorPresentationContext, ErrorPresenterController
 from .hook_runtime import HookRuntimeController, HookRuntimeWidgets
 from .log_panel import LogPanelController, LogPanelWidgets
-from .quick_hook_actions import QUICK_HOOK_ACTIONS, QUICK_HOOK_BUTTON_ATTRS
+from .quick_hook_actions import (
+    ANALYSIS_SCENARIO_BUTTON_ATTRS,
+    ANALYSIS_SCENARIO_PROFILES,
+    QUICK_HOOK_ACTIONS,
+    QUICK_HOOK_BUTTON_ATTRS,
+)
 from .rpc_tools import RpcToolController, RpcToolWidgets
 from .terminal_console import TerminalConsoleController, TerminalConsoleWidgets
 from .ui_thread_dispatcher import UiThreadDispatcher
@@ -52,6 +57,7 @@ _BUILD_REQUIRED_WINDOW_ATTRS = (
     "view_activity_button",
     "view_service_button",
     *QUICK_HOOK_BUTTON_ATTRS,
+    *ANALYSIS_SCENARIO_BUTTON_ATTRS,
     "object_info_button",
     "object_explain_button",
     "view_info_button",
@@ -88,6 +94,7 @@ _WIRE_REQUIRED_WINDOW_ATTRS = (
     "view_activity_button",
     "view_service_button",
     *QUICK_HOOK_BUTTON_ATTRS,
+    *ANALYSIS_SCENARIO_BUTTON_ATTRS,
     "object_info_button",
     "object_explain_button",
     "view_info_button",
@@ -136,6 +143,8 @@ def build_main_window_controllers(window, deps) -> MainWindowControllers:
         ),
         status_bar=window.status_bar,
         project_root=deps.context.project_root,
+        selected_package_name=lambda: window.app_combo.currentData(),
+        selected_script_path=window.selected_script_path,
     )
     error_presenter = ErrorPresenterController(
         ErrorPresentationContext(
@@ -143,6 +152,8 @@ def build_main_window_controllers(window, deps) -> MainWindowControllers:
             status_setter=window.set_status_text,
             busy_setter=window.set_busy,
             append_log=log_panel.append_log,
+            focus_target=window.focus_error_target,
+            update_recovery_banner=window.update_error_recovery_banner,
         )
     )
     app_workflow = AppWorkflowController(
@@ -169,6 +180,13 @@ def build_main_window_controllers(window, deps) -> MainWindowControllers:
             stop_hook_button=window.stop_hook_button,
             current_state_label=window.current_state_label,
             app_combo=window.app_combo,
+            set_session_status=lambda phase, mode=None, package=None, script=None, detail=None: window.set_session_status(
+                phase=phase,
+                mode=mode,
+                package=package,
+                script=script,
+                detail=detail,
+            ),
         ),
         deps=deps,
         set_busy=window.set_busy,
@@ -316,6 +334,13 @@ def wire_main_window_controller_signals(window, controllers: MainWindowControlle
         getattr(window, action.button_attr).clicked.connect(
             lambda action_key=action.key: controllers.hook_runtime.start_quick_hook(
                 action_key,
+                window.spawn_mode_radio.isChecked(),
+            )
+        )
+    for profile in ANALYSIS_SCENARIO_PROFILES:
+        getattr(window, profile.button_attr).clicked.connect(
+            lambda _checked=False, profile_key=profile.key: controllers.hook_runtime.start_analysis_scenario(
+                profile_key,
                 window.spawn_mode_radio.isChecked(),
             )
         )

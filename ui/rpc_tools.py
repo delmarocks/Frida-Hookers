@@ -2,12 +2,11 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from pathlib import Path
 
 from PySide6.QtCore import QThread, Qt
 from PySide6.QtWidgets import QDialog, QLineEdit, QMessageBox, QPushButton, QTextEdit, QVBoxLayout, QWidget, QComboBox
 
-from core.errors import RpcCallError, RpcTargetMissingError, to_ui_error_payload
+from core.errors import HookersError, RpcCallError, RpcTargetMissingError, to_ui_error_payload
 
 from .controller_types import (
     BusySetter,
@@ -71,6 +70,15 @@ class RpcToolController:
         on_success: WorkerSuccessHandler,
     ) -> None:
         if self.rpc_action_thread is not None:
+            self.show_worker_error(
+                to_ui_error_payload(
+                    HookersError(
+                        ui_messages.RPC_ACTION_BUSY_BODY,
+                        severity="warning",
+                        next_step=ui_messages.RPC_ACTION_BUSY_NEXT_STEP,
+                    )
+                )
+            )
             return
 
         self.set_busy(True, busy_message)
@@ -155,10 +163,12 @@ class RpcToolController:
                 package_name = self.ensure_current_app_ready()
                 script_path = self.deps.rpc_service.generate_hook_script(hook_target)
                 return GeneratedHookScriptPayload(package_name=package_name, script_path=script_path)
+            except HookersError:
+                raise
             except Exception as exc:
                 raise RpcCallError(
-                    "生成 Hook 脚本失败。",
-                    hint="请检查目标类名/方法名格式以及当前 App 状态后重试。",
+                    ui_messages.HOOK_SCRIPT_GENERATE_FAILED_BODY,
+                    hint=ui_messages.HOOK_SCRIPT_GENERATE_FAILED_HINT,
                 ) from exc
 
         self.start_rpc_action(
@@ -198,6 +208,8 @@ class RpcToolController:
                 package_name = self.ensure_current_app_ready()
                 result = self.deps.rpc_service.activitys()
                 return RpcResultPayload(package_name=package_name, result=result)
+            except HookersError:
+                raise
             except Exception as exc:
                 raise RpcCallError("加载 Activity 列表失败。") from exc
 
@@ -224,6 +236,8 @@ class RpcToolController:
                 package_name = self.ensure_current_app_ready()
                 result = self.deps.rpc_service.services()
                 return RpcResultPayload(package_name=package_name, result=result)
+            except HookersError:
+                raise
             except Exception as exc:
                 raise RpcCallError("加载 Service 列表失败。") from exc
 
@@ -251,7 +265,7 @@ class RpcToolController:
                 target = self.inspect_target()
                 result = self.deps.rpc_service.object_info(target)
                 return RpcResultPayload(package_name=package_name, target=target, result=result)
-            except RpcTargetMissingError:
+            except HookersError:
                 raise
             except Exception as exc:
                 raise RpcCallError("加载对象信息失败。") from exc
@@ -284,7 +298,7 @@ class RpcToolController:
                 target = self.inspect_target()
                 result = self.deps.rpc_service.object_to_explain(target)
                 return RpcResultPayload(package_name=package_name, target=target, result=result)
-            except RpcTargetMissingError:
+            except HookersError:
                 raise
             except Exception as exc:
                 raise RpcCallError("解释对象失败。") from exc
@@ -317,7 +331,7 @@ class RpcToolController:
                 target = self.inspect_target()
                 result = self.deps.rpc_service.view_info(target)
                 return RpcResultPayload(package_name=package_name, target=target, result=result)
-            except RpcTargetMissingError:
+            except HookersError:
                 raise
             except Exception as exc:
                 raise RpcCallError("加载 View 信息失败。") from exc
